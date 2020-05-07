@@ -1,3 +1,3 @@
-module github.com/No3371/tcp
+module tcpwrapper
 
 go 1.14
