@@ -255,8 +255,8 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 		conn.recevingQueue = make(chan []byte, chanSize)
 	}
 	if !buffered {
+		conn.closing.Add(1)
 		go func() {
-			conn.closing.Add(1)
 			defer func() {
 				conn.closing.Done()
 			}()
@@ -309,10 +309,10 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 			}
 		}()
 	} else {
+		conn.closing.Add(2)
 		recvBuffer := bytes.NewBuffer(make([]byte, 0, bufferSize))
 		waitingForBuffer := make(chan struct{})
 		go func() {
-			conn.closing.Add(1)
 			defer func() {
 				conn.closing.Done()
 			}()
@@ -377,7 +377,6 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 
 		if !discardMessage {
 			go func() {
-				conn.closing.Add(1)
 				defer func() {
 					conn.closing.Done()
 					if InfoLogger != nil {
