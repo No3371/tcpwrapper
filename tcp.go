@@ -13,12 +13,14 @@ type ConnSession struct {
 	Conn                   net.Conn
 	connUserClose          chan struct{}
 	internalConnErrorClose chan struct{}
+	isClosingConn          chan struct{}
 	closing                *sync.WaitGroup
 }
 
 func (conn *ConnSession) Init() {
 	conn.connUserClose = make(chan struct{})
 	conn.internalConnErrorClose = make(chan struct{})
+	conn.isClosingConn = make(chan struct{})
 	conn.closing = &sync.WaitGroup{}
 }
 
@@ -35,6 +37,8 @@ func (conn *ConnSession) RequestClose() {
 }
 
 func (conn *ConnSession) SafeWaitClose() {
+	close(conn.isClosingConn)
+	conn.Conn.SetDeadline(time.Now())
 	if SpamLogger != nil {
 		SpamLogger(fmt.Sprintf("[CONN] %s is waiting for all closing units.", conn.Remote()))
 	}
@@ -104,7 +108,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 			return true
 		}
 	}
-	
+
 	if !buffered {
 		conn.closing.Add(1)
 		go func() {
@@ -114,7 +118,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 			if InfoLogger != nil {
 				InfoLogger(fmt.Sprintf("[CONN] Sender for %s is up.\n", conn.Remote()))
 
-				defer InfoLogger(fmt.Sprintf("[CONN] Sender for WS# %s is down!\n", conn.Remote()))
+				defer InfoLogger(fmt.Sprintf("[CONN] Sender for %s is down!\n", conn.Remote()))
 			}
 
 			for {
@@ -162,6 +166,11 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 					default:
 						err := WriteBytes(conn.Conn, msg, interruptor)
 						if err != nil {
+							if _, ok := <-conn.isClosingConn; !ok {
+								if err.(net.Error).Timeout() {
+									continue
+								}
+							}
 							conn.errorClose(err, "sending")
 							if OnSenderErrorClosed != nil {
 								OnSenderErrorClosed(conn)
@@ -258,6 +267,11 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 
 				err := WriteBytes(conn.Conn, sendBuffer.Next(sendBuffer.Len()), interruptor)
 				if err != nil {
+					if _, ok := <-conn.isClosingConn; !ok {
+						if err.(net.Error).Timeout() {
+							continue
+						}
+					}
 					conn.errorClose(err, "written bytes mismatch")
 					if OnSenderErrorClosed != nil {
 						OnSenderErrorClosed(conn)
@@ -326,6 +340,11 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 					return
 				}
 				if err != nil && err != &sharedInterrupted {
+					if _, ok := <-conn.isClosingConn; !ok {
+						if err.(net.Error).Timeout() {
+							continue
+						}
+					}
 					conn.errorClose(err, "reading message")
 					if OnReceiverErrorClosed != nil {
 						OnReceiverErrorClosed(conn)
@@ -412,6 +431,11 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				for buffered < read {
 					w, err := recvBuffer.Write(recvWorkspace[buffered:read])
 					if err != nil {
+						if _, ok := <-conn.isClosingConn; !ok {
+							if err.(net.Error).Timeout() {
+								continue
+							}
+						}
 						conn.errorClose(err, "receiving and writing to buffer")
 						if OnReceiverErrorClosed != nil {
 							OnReceiverErrorClosed(conn)
