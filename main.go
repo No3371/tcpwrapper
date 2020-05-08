@@ -5,9 +5,9 @@ import (
 	"net"
 )
 
-var ErrorLogger func(content string)
-var InfoLogger func(content string)
-var SpamLogger func(content string)
+var ErrorLogger func(v ...interface{})
+var InfoLogger func(v ...interface{})
+var SpamLogger func(v ...interface{})
 var OnReceiverUserClosed func(conn *ConnSession)
 var OnSenderUserClosed func(conn *ConnSession)
 var OnReceiverErrorClosed func(conn *ConnSession)

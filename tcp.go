@@ -12,13 +12,13 @@ import (
 type ConnSession struct {
 	Conn                   net.Conn
 	connUserClose          chan struct{}
-	InternalConnErrorClose chan struct{}
+	internalConnErrorClose chan struct{}
 	closing                *sync.WaitGroup
 }
 
 func (conn *ConnSession) Init() {
 	conn.connUserClose = make(chan struct{})
-	conn.InternalConnErrorClose = make(chan struct{})
+	conn.internalConnErrorClose = make(chan struct{})
 	conn.closing = &sync.WaitGroup{}
 }
 
@@ -30,26 +30,26 @@ func (conn *ConnSession) Remote() string {
 	return conn.Conn.RemoteAddr().String()
 }
 
-func (conn *ConnSession) Close() {
+func (conn *ConnSession) RequestClose() {
 	close(conn.connUserClose)
 }
 
-func (conn *ConnSession) SafeCloseConn() {
+func (conn *ConnSession) SafeWaitClose() {
 	conn.closing.Wait()
 	conn.Conn.Close()
 }
 
 func (conn *ConnSession) errorClose(err error, info string) {
-	close(conn.InternalConnErrorClose)
+	close(conn.internalConnErrorClose)
 	if ErrorLogger != nil {
 		ErrorLogger(fmt.Sprintf("[CONN] An error occured in conn to %s: %s. Info: %s", conn.Remote(), err, info))
 	}
 }
 
-func (conn *ConnSession) WaitForClose() {
+func (conn *ConnSession) WaitAnyClose() {
 	select {
 	case <-conn.connUserClose:
-	case <-conn.InternalConnErrorClose:
+	case <-conn.internalConnErrorClose:
 	}
 }
 
@@ -93,7 +93,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 						OnSenderUserClosed(conn)
 					}
 					return
-				case <-conn.InternalConnErrorClose:
+				case <-conn.internalConnErrorClose:
 					if InfoLogger != nil {
 						InfoLogger(fmt.Sprintf("[CONN > S] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
 					}
@@ -114,7 +114,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 							OnSenderUserClosed(conn)
 						}
 						return
-					case <-conn.InternalConnErrorClose:
+					case <-conn.internalConnErrorClose:
 						if InfoLogger != nil {
 							InfoLogger(fmt.Sprintf("[CONN > S] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
 						}
@@ -177,7 +177,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 							OnSenderUserClosed(conn)
 						}
 						return
-					case <-conn.InternalConnErrorClose:
+					case <-conn.internalConnErrorClose:
 						if InfoLogger != nil {
 							InfoLogger(fmt.Sprintf("[CONN > S] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
 						}
@@ -272,7 +272,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 						OnReceiverUserClosed(conn)
 					}
 					return false
-				case <-conn.InternalConnErrorClose:
+				case <-conn.internalConnErrorClose:
 					if InfoLogger != nil {
 						InfoLogger(fmt.Sprintf("[CONN > R] Internal Error Close. Closing Receiver for %s.\n", conn.Remote()))
 					}
@@ -304,7 +304,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 						OnReceiverUserClosed(conn)
 					}
 					return
-				case <-conn.InternalConnErrorClose:
+				case <-conn.internalConnErrorClose:
 					if InfoLogger != nil {
 						InfoLogger(fmt.Sprintf("[CONN > R] Internal Error Close. Closing Receiver for %s.\n", conn.Remote()))
 					}
@@ -343,7 +343,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 						OnReceiverUserClosed(conn)
 					}
 					return false
-				case <-conn.InternalConnErrorClose:
+				case <-conn.internalConnErrorClose:
 					if InfoLogger != nil {
 						InfoLogger(fmt.Sprintf("[CONN > R] Internal Error Close. Closing Receiver for %s.\n", conn.Remote()))
 					}
@@ -414,7 +414,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 						OnReceiverUserClosed(conn)
 					}
 					return false
-				case <-conn.InternalConnErrorClose:
+				case <-conn.internalConnErrorClose:
 					if InfoLogger != nil {
 						InfoLogger(fmt.Sprintf("[CONN > R] Internal Error Close. Closing resolver for %s.\n", conn.Remote()))
 					}
