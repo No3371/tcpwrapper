@@ -34,7 +34,7 @@ func (session *ConnSession) ReadBytes(dest []byte, interruptor interruptorFunc) 
 		i, err := session.Conn.Read(dest[read:])
 		if err != nil {
 			if LowSpamLogger != nil {
-				LowSpamLogger("ReadBytes() error: %s", err)
+				LowSpamLogger("ReadBytes() error: ", err)
 			}
 			return err
 		}
@@ -42,7 +42,7 @@ func (session *ConnSession) ReadBytes(dest []byte, interruptor interruptorFunc) 
 		if interruptor != nil {
 			if err := interruptor(session); err != nil {
 				if LowSpamLogger != nil {
-					LowSpamLogger("ReadBytes() interruptor error: %s", err)
+					LowSpamLogger("ReadBytes() interruptor error: ", err)
 				}
 				return err
 			}
@@ -58,7 +58,7 @@ func (session *ConnSession) WriteBytes(message []byte, interruptor interruptorFu
 		i, err := session.Conn.Write(message[written:])
 		if err != nil {
 			if LowSpamLogger != nil {
-				LowSpamLogger("WriteBytes() error: %s", err)
+				LowSpamLogger("WriteBytes() error: ", err)
 			}
 			return err
 		}
@@ -66,7 +66,7 @@ func (session *ConnSession) WriteBytes(message []byte, interruptor interruptorFu
 		if interruptor != nil {
 			if err := interruptor(session); err != nil {
 				if LowSpamLogger != nil {
-					LowSpamLogger("WriteBytes() interruptor error: %s", err)
+					LowSpamLogger("WriteBytes() interruptor error: ", err)
 				}
 				return err
 			}
@@ -78,7 +78,7 @@ func (session *ConnSession) WriteBytes(message []byte, interruptor interruptorFu
 func (session *ConnSession) ReadMessage(buffer []byte, interruptor interruptorFunc) (uint32, error) {
 	if err := session.ReadBytes(buffer[:4], interruptor); err != nil {
 		if LowSpamLogger != nil {
-			LowSpamLogger("ReadMessage() error: %s", err)
+			LowSpamLogger("ReadMessage() error: ", err)
 		}
 		return 0, err
 	}
@@ -90,11 +90,11 @@ func (session *ConnSession) ReadMessage(buffer []byte, interruptor interruptorFu
 	}
 
 	if LowSpamLogger != nil {
-		LowSpamLogger("ReadBytes(): %d", l)
+		LowSpamLogger("ReadBytes(): ", l)
 	}
 	if err := session.ReadBytes(buffer[:l], interruptor); err != nil {
 		if LowSpamLogger != nil {
-			LowSpamLogger("ReadMessage() interruptor error: %s", err)
+			LowSpamLogger("ReadMessage() interruptor error: ", err)
 		}
 		return 0, err
 	}

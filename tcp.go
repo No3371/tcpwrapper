@@ -60,15 +60,9 @@ func (conn *ConnSession) SafeWaitClose() {
 }
 
 func (conn *ConnSession) errorClose(err error, info string) {
-	if _, open := <-conn.internalConnErrorClose; open {
-		close(conn.internalConnErrorClose)
-		if ErrorLogger != nil {
-			ErrorLogger(fmt.Sprintf("[CONN] An error occured in conn to %s: %s. Info: %s", conn.Remote(), err, info))
-		}
-	} else {
-		if ErrorLogger != nil {
-			ErrorLogger(fmt.Sprintf("[CONN] An error occured but the connection %s is already signaled to error close: %s. Info: %s", conn.Remote(), err, info))
-		}
+	close(conn.internalConnErrorClose)
+	if ErrorLogger != nil {
+		ErrorLogger(fmt.Sprintf("[CONN] An error occured in conn %s: %s. Info: %s", conn.Remote(), err, info))
 	}
 }
 
@@ -108,8 +102,6 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 					defaultOnErrorClosingSender(conn)
 					return
 				case msg := <-conn.sendingQueue:
-					// After getting the message to send, still
-
 					err := conn.WriteBytes(msg, defaultSenderInterruptor)
 					if err != nil {
 						// Check if the error is our custom interrupt error
@@ -129,9 +121,12 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 						}
 
 						// Unexpected networking errors...
-						conn.errorClose(err, "sending")
-						if OnSenderErrorClosed != nil {
-							OnSenderErrorClosed(conn)
+						// Only issue th error if the session is not closing
+						if defaultSafetySelect(conn) {
+							conn.errorClose(err, "sending")
+							if OnSenderErrorClosed != nil {
+								OnSenderErrorClosed(conn)
+							}
 						}
 						return
 					}
@@ -173,16 +168,20 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 						} else {
 							written, err := sendBuffer.Write(msg)
 							if err != nil {
-								conn.errorClose(err, "writing to send buffer")
-								if OnSenderErrorClosed != nil {
-									OnSenderErrorClosed(conn)
+								if defaultSafetySelect(conn) {
+									conn.errorClose(err, "writing to send buffer")
+									if OnSenderErrorClosed != nil {
+										OnSenderErrorClosed(conn)
+									}
 								}
 								return
 							}
 							if written != len(msg) {
-								conn.errorClose(err, "buffered bytes mismatch")
-								if OnSenderErrorClosed != nil {
-									OnSenderErrorClosed(conn)
+								if defaultSafetySelect(conn) {
+									conn.errorClose(err, "buffered bytes mismatch")
+									if OnSenderErrorClosed != nil {
+										OnSenderErrorClosed(conn)
+									}
 								}
 								return
 							}
@@ -192,16 +191,20 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 							msg := <-conn.sendingQueue
 							written, err := sendBuffer.Write(msg)
 							if err != nil {
-								conn.errorClose(err, "writing to send buffer")
-								if OnSenderErrorClosed != nil {
-									OnSenderErrorClosed(conn)
+								if defaultSafetySelect(conn) {
+									conn.errorClose(err, "writing to send buffer")
+									if OnSenderErrorClosed != nil {
+										OnSenderErrorClosed(conn)
+									}
 								}
 								return
 							}
 							if written != len(msg) {
-								conn.errorClose(err, "buffered  bytes mismatch")
-								if OnSenderErrorClosed != nil {
-									OnSenderErrorClosed(conn)
+								if defaultSafetySelect(conn) {
+									conn.errorClose(err, "buffered  bytes mismatch")
+									if OnSenderErrorClosed != nil {
+										OnSenderErrorClosed(conn)
+									}
 								}
 								return
 							}
@@ -228,10 +231,12 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 						return
 					}
 
-					// Unexpected networking errors...
-					conn.errorClose(err, "writing bytes")
-					if OnSenderErrorClosed != nil {
-						OnSenderErrorClosed(conn)
+					if defaultSafetySelect(conn) {
+						// Unexpected networking errors...
+						conn.errorClose(err, "writing bytes")
+						if OnSenderErrorClosed != nil {
+							OnSenderErrorClosed(conn)
+						}
 					}
 					return
 				}
@@ -288,9 +293,11 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 						if handleClosingTimedout(conn, err, defaultOnUserClosingReceiver, defaultOnErrorClosingReceiver) {
 							return
 						}
-						conn.errorClose(err, "reading message")
-						if OnReceiverErrorClosed != nil {
-							OnReceiverErrorClosed(conn)
+						if defaultSafetySelect(conn) {
+							conn.errorClose(err, "reading message")
+							if OnReceiverErrorClosed != nil {
+								OnReceiverErrorClosed(conn)
+							}
 						}
 						return
 					}
@@ -330,9 +337,11 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 					return
 				}
 				if err != nil {
-					conn.errorClose(err, "receiving")
-					if OnReceiverErrorClosed != nil {
-						OnReceiverErrorClosed(conn)
+					if defaultSafetySelect(conn) {
+						conn.errorClose(err, "receiving")
+						if OnReceiverErrorClosed != nil {
+							OnReceiverErrorClosed(conn)
+						}
 					}
 					return
 				}
@@ -355,14 +364,15 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				for buffered < read {
 					w, err := recvBuffer.Write(recvWorkspace[buffered:read])
 					if err != nil {
-						if _, ok := <-conn.closingRS; !ok {
-							if err.(net.Error).Timeout() {
-								continue
-							}
+						if handleClosingTimedout(conn, err, defaultOnUserClosingReceiver, defaultOnUserClosingSender) {
+							return
 						}
-						conn.errorClose(err, "receiving and writing to buffer")
-						if OnReceiverErrorClosed != nil {
-							OnReceiverErrorClosed(conn)
+
+						if defaultSafetySelect(conn) {
+							conn.errorClose(err, "receiving and writing to buffer")
+							if OnReceiverErrorClosed != nil {
+								OnReceiverErrorClosed(conn)
+							}
 						}
 						return
 					}
@@ -389,13 +399,12 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 					for read < 4 {
 						r, err := recvBuffer.Read(msgWorkspace[read:4])
 						if err != nil {
-							conn.errorClose(err, "resolving buffered bytes")
+							if !defaultSafetySelect(conn) {
+								conn.errorClose(err, "resolving buffered bytes")
+							}
 							return
 						}
 						read += r
-						if !defaultSafetySelect(conn) {
-							return
-						}
 					}
 					var msgLength uint32
 					if USE_BIG_ENDIAN {
@@ -407,13 +416,12 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 					for uint32(read) < msgLength {
 						r, err := recvBuffer.Read(msgWorkspace[read:msgLength])
 						if err != nil {
-							conn.errorClose(err, "resolving buffered bytes")
+							if !defaultSafetySelect(conn) {
+								conn.errorClose(err, "resolving buffered bytes")
+							}
 							return
 						}
 						read += r
-						if !defaultSafetySelect(conn) {
-							return
-						}
 					}
 					select {
 					case <-waitingForBuffer:
