@@ -60,9 +60,15 @@ func (conn *ConnSession) SafeWaitClose() {
 }
 
 func (conn *ConnSession) errorClose(err error, info string) {
-	close(conn.internalConnErrorClose)
-	if ErrorLogger != nil {
-		ErrorLogger(fmt.Sprintf("[CONN] An error occured in conn to %s: %s. Info: %s", conn.Remote(), err, info))
+	if _, open := <-conn.internalConnErrorClose; open {
+		close(conn.internalConnErrorClose)
+		if ErrorLogger != nil {
+			ErrorLogger(fmt.Sprintf("[CONN] An error occured in conn to %s: %s. Info: %s", conn.Remote(), err, info))
+		}
+	} else {
+		if ErrorLogger != nil {
+			ErrorLogger(fmt.Sprintf("[CONN] An error occured but the connection %s is already signaled to error close: %s. Info: %s", conn.Remote(), err, info))
+		}
 	}
 }
 
