@@ -35,8 +35,11 @@ func (conn *ConnSession) RequestClose() {
 }
 
 func (conn *ConnSession) SafeWaitClose() {
+	if SpamLogger != nil {
+		SpamLogger(fmt.Sprintf("[CONN] Receiver of %s is waiting for all closing units.", conn.Remote))
+	}
 	conn.closing.Wait()
-	if InfoLogger != nil {
+	if InfoLogger == nil {
 		conn.Conn.Close()
 	} else {
 		remote := conn.Remote()
@@ -153,8 +156,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 			}()
 			if InfoLogger != nil {
 				InfoLogger(fmt.Sprintf("[CONN] Sender for %s is up.\n", conn.Remote()))
-
-				defer InfoLogger(fmt.Sprintf("[CONN] Sender for WS# %s is down!\n", conn.Remote()))
+				defer InfoLogger(fmt.Sprintf("[CONN] Sender for %s is down!\n", conn.Remote()))
 			}
 			var trySendAll = func() {
 			ending:
@@ -256,8 +258,11 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 	return pipe
 }
 
-func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) chan []byte {
-	var pipe = make(chan []byte, chanSize)
+func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, discardMessage bool) chan []byte {
+	var pipe chan []byte
+	if !discardMessage {
+		pipe = make(chan []byte, chanSize)
+	}
 	if !buffered {
 		go func() {
 			conn.closing.Add(1)
@@ -265,8 +270,8 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 				conn.closing.Done()
 			}()
 			if InfoLogger != nil {
-				InfoLogger(fmt.Sprintf("\n[CONN] Receiver of %s is up", conn.Remote()))
-				defer InfoLogger(fmt.Sprintf("\n[CONN] Receiver of %s is down!", conn.Remote()))
+				InfoLogger(fmt.Sprintf("[CONN] Receiver of %s is up", conn.Remote()))
+				defer InfoLogger(fmt.Sprintf("[CONN] Receiver of %s is down!", conn.Remote()))
 			}
 			var shouldContinue = func() bool {
 				select {
@@ -299,35 +304,19 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 				if !shouldContinue() {
 					return
 				}
-				msg := make([]byte, receivedLength)
-				copy(msg, recvWorkspace[:receivedLength])
-				select {
-				case <-conn.connUserClose:
-					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN > R] Signaled. Closing receiver for %s.\n", conn.Remote()))
-					}
-					if OnReceiverUserClosed != nil {
-						OnReceiverUserClosed(conn)
-					}
-					return
-				case <-conn.internalConnErrorClose:
-					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN > R] Internal Error Close. Closing Receiver for %s.\n", conn.Remote()))
-					}
+				if err != nil {
+					conn.errorClose(err, "reading message")
 					if OnReceiverUserClosed != nil {
 						OnReceiverErrorClosed(conn)
 					}
 					return
-				default:
-					if err != nil {
-						conn.errorClose(err, "reading message")
-						if OnReceiverUserClosed != nil {
-							OnReceiverErrorClosed(conn)
-						}
-						return
-					}
-					pipe <- msg
 				}
+				if discardMessage {
+					continue
+				}
+				msg := make([]byte, receivedLength)
+				copy(msg, recvWorkspace[:receivedLength])
+				pipe <- msg
 
 			}
 		}()
@@ -382,6 +371,10 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 					return
 				}
 
+				if discardMessage {
+					continue
+				}
+
 				for recvBuffer.Cap()-recvBuffer.Len() < read {
 					if SpamLogger != nil {
 						SpamLogger(fmt.Sprintf("[CONN] Receiver is waiting for buffer being resolved"))
@@ -404,82 +397,87 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 					}
 					buffered += w
 				}
+				if SpamLogger != nil {
+					SpamLogger(fmt.Sprintf("[CONN] Receiver finished %d bytes to buffer", buffered))
+				}
 
 			}
 		}()
 
-		go func() {
-			conn.closing.Add(1)
-			defer func() {
-				conn.closing.Done()
+		if !discardMessage {
+			go func() {
+				conn.closing.Add(1)
+				defer func() {
+					conn.closing.Done()
+				}()
+				var shouldContinue = func() bool {
+					select {
+					case <-conn.connUserClose:
+						if InfoLogger != nil {
+							InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing resolver for %s.\n", conn.Remote()))
+						}
+						if OnReceiverUserClosed != nil {
+							OnReceiverUserClosed(conn)
+						}
+						return false
+					case <-conn.internalConnErrorClose:
+						if InfoLogger != nil {
+							InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing resolver for %s.\n", conn.Remote()))
+						}
+						if OnReceiverUserClosed != nil {
+							OnReceiverErrorClosed(conn)
+						}
+						return false
+					default:
+						return true
+					}
+				}
+				msgWorkspace := make([]byte, bufferSize)
+				for {
+					read := 0
+					for read < 4 {
+						r, err := recvBuffer.Read(msgWorkspace[read:4])
+						if err != nil {
+							conn.errorClose(err, "resolving buffered bytes")
+							return
+						}
+						read += r
+						if !shouldContinue() {
+							return
+						}
+					}
+					var msgLength uint32
+					if USE_BIG_ENDIAN {
+						msgLength = binary.BigEndian.Uint32(msgWorkspace)
+					} else {
+						msgLength = binary.LittleEndian.Uint32(msgWorkspace)
+					}
+					read = 0
+					for uint32(read) < msgLength {
+						r, err := recvBuffer.Read(msgWorkspace[read:msgLength])
+						if err != nil {
+							conn.errorClose(err, "resolving buffered bytes")
+							return
+						}
+						read += r
+						if !shouldContinue() {
+							return
+						}
+					}
+					select {
+					case <-waitingForBuffer:
+						if SpamLogger != nil {
+							SpamLogger(fmt.Sprintf("[CONN] Resolver notified the buffer is resolved"))
+						}
+					default:
+					}
+
+					msg := make([]byte, msgLength)
+					copy(msg, msgWorkspace)
+					pipe <- msg
+				}
 			}()
-			var shouldContinue = func() bool {
-				select {
-				case <-conn.connUserClose:
-					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing resolver for %s.\n", conn.Remote()))
-					}
-					if OnReceiverUserClosed != nil {
-						OnReceiverUserClosed(conn)
-					}
-					return false
-				case <-conn.internalConnErrorClose:
-					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing resolver for %s.\n", conn.Remote()))
-					}
-					if OnReceiverUserClosed != nil {
-						OnReceiverErrorClosed(conn)
-					}
-					return false
-				default:
-					return true
-				}
-			}
-			msgWorkspace := make([]byte, bufferSize)
-			for {
-				read := 0
-				for read < 4 {
-					r, err := recvBuffer.Read(msgWorkspace[read:4])
-					if err != nil {
-						conn.errorClose(err, "resolving buffered bytes")
-						return
-					}
-					read += r
-					if !shouldContinue() {
-						return
-					}
-				}
-				var msgLength uint32
-				if USE_BIG_ENDIAN {
-					msgLength = binary.BigEndian.Uint32(msgWorkspace)
-				} else {
-					msgLength = binary.LittleEndian.Uint32(msgWorkspace)
-				}
-				read = 0
-				for uint32(read) < msgLength {
-					r, err := recvBuffer.Read(msgWorkspace[read:msgLength])
-					if err != nil {
-						conn.errorClose(err, "resolving buffered bytes")
-						return
-					}
-					read += r
-					if !shouldContinue() {
-						return
-					}
-				}
-				select {
-				case <-waitingForBuffer:
-					if SpamLogger != nil {
-						SpamLogger(fmt.Sprintf("[CONN] Resolver notified the buffer is resolved"))
-					}
-				default:
-				}
-
-				msg := make([]byte, msgLength)
-				copy(msg, msgWorkspace)
-				pipe <- msg
-			}
-		}()
+		}
 	}
 	return pipe
 
