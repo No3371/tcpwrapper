@@ -53,7 +53,19 @@ func defaultSafetySelect(session *ConnSession) bool {
 	default:
 		return true
 	}
+}
 
+func defaultSafetySelectHandle(session *ConnSession, onUserClose sessionHandler, onErrorClose sessionHandler) bool {
+	select {
+	case <-session.connUserClose:
+		onUserClose(session)
+		return false
+	case <-session.internalConnErrorClose:
+		onErrorClose(session)
+		return false
+	default:
+		return true
+	}
 }
 
 func defaultOnUserClosingSender(session *ConnSession) {
@@ -97,7 +109,16 @@ func defaultOnErrorClosingReceiver(session *ConnSession) {
 func handleClosingTimedout(session *ConnSession, err error, userClosingHandler sessionHandler, errorClosingHandler sessionHandler) (handled bool) {
 	// We may set the deadline of the net.Conn so it unblocks from the net.Conn.Write() in order to gracefully close the session.
 	// We assure here that the timeout error is caused by our logic.
-	if _, ok := <-session.closingRS; !ok && err.(net.Error).Timeout() {
+	if !err.(net.Error).Timeout() {
+		return false
+	}
+	if LowSpamLogger != nil {
+		LowSpamLogger("It's a timeout: %v", err)
+	}
+	if _, ok := <-session.closingRS; !ok {
+		if LowSpamLogger != nil {
+			LowSpamLogger("The session is closing: %s", session.Remote())
+		}
 		if _, ok := <-session.connUserClose; !ok {
 			userClosingHandler(session)
 		} else if _, ok = <-session.internalConnErrorClose; !ok {

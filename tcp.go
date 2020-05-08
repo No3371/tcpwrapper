@@ -271,22 +271,23 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				if SpamLogger != nil {
 					SpamLogger(fmt.Sprintf("[CONN] Receiver read a message of length: %d", receivedLength))
 				}
-				
-				switch err {
-				case &sharedInterruptedByUser:
-					defaultOnUserClosingReceiver(conn)
-				case &sharedInterruptedByError:
-					defaultOnErrorClosingReceiver(conn)
-				case nil:
-				default:
-					if handleClosingTimedout(conn, err, defaultOnUserClosingReceiver, defaultOnErrorClosingReceiver) {
+
+				if err != nil {
+					switch err {
+					case &sharedInterruptedByUser:
+						defaultOnUserClosingReceiver(conn)
+					case &sharedInterruptedByError:
+						defaultOnErrorClosingReceiver(conn)
+					default:
+						if handleClosingTimedout(conn, err, defaultOnUserClosingReceiver, defaultOnErrorClosingReceiver) {
+							return
+						}
+						conn.errorClose(err, "reading message")
+						if OnReceiverErrorClosed != nil {
+							OnReceiverErrorClosed(conn)
+						}
 						return
 					}
-					conn.errorClose(err, "reading message")
-					if OnReceiverErrorClosed != nil {
-						OnReceiverErrorClosed(conn)
-					}
-					return
 				}
 
 				if discardMessage {
@@ -313,35 +314,13 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				InfoLogger(fmt.Sprintf("\n[CONN] Receiver of %s is up", conn.Remote()))
 				defer InfoLogger(fmt.Sprintf("\n[CONN] Receiver of %s is down!", conn.Remote()))
 			}
-			var shouldContinue = func() bool {
-				select {
-				case <-conn.connUserClose:
-					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing receiver for %s.\n", conn.Remote()))
-					}
-					if OnReceiverUserClosed != nil {
-						OnReceiverUserClosed(conn)
-					}
-					return false
-				case <-conn.internalConnErrorClose:
-					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing Receiver for %s.\n", conn.Remote()))
-					}
-					if OnReceiverErrorClosed != nil {
-						OnReceiverErrorClosed(conn)
-					}
-					return false
-				default:
-					return true
-				}
-			}
 			recvWorkspace := make([]byte, bufferSize)
 			for {
-				if !shouldContinue() {
+				if !defaultSafetySelectHandle(conn, defaultOnUserClosingReceiver, defaultOnErrorClosingReceiver) {
 					return
 				}
 				read, err := conn.Conn.Read(recvWorkspace)
-				if !shouldContinue() {
+				if !defaultSafetySelectHandle(conn, defaultOnUserClosingReceiver, defaultOnErrorClosingReceiver) {
 					return
 				}
 				if err != nil {
@@ -361,7 +340,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 						SpamLogger(fmt.Sprintf("[CONN] Receiver is waiting for buffer being resolved"))
 					}
 					waitingForBuffer <- struct{}{}
-					if !shouldContinue() {
+					if !defaultSafetySelectHandle(conn, defaultOnUserClosingReceiver, defaultOnErrorClosingReceiver) {
 						return
 					}
 				}
