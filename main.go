@@ -2,7 +2,6 @@ package tcpwrapper
 
 import (
 	"encoding/binary"
-	"net"
 )
 
 var ErrorLogger func(v ...interface{})
@@ -15,47 +14,56 @@ var OnSenderErrorClosed func(conn *ConnSession)
 
 var BUFFERED_SEND_INTERVAL_MS uint = 5
 var USE_BIG_ENDIAN = true
-var sharedInterrupted interrupted = interrupted{}
+
+var sharedInterruptedByUser interrupted = interrupted{e: "interrupted by user"}
+var sharedInterruptedByError interrupted = interrupted{e: "interrupted because of error"}
 
 type interrupted struct {
+	e string
 }
 
 func (e *interrupted) Error() string {
-	return "interrupted internally"
+	return e.e
 }
 
-func ReadBytes(conn net.Conn, dest []byte, interruptor func() bool) error {
+// ReadBytes needs a interruptor func to execute between Write() calls.
+func (session *ConnSession) ReadBytes(dest []byte, interruptor interruptorFunc) error {
 	read := 0
 	for read < len(dest) {
-		i, err := conn.Read(dest[read:])
+		i, err := session.Conn.Read(dest[read:])
 		if err != nil {
 			return err
 		}
 		read += i
-		if interruptor != nil && !interruptor() {
-			return &sharedInterrupted
+		if interruptor != nil {
+			if err := interruptor(session); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func WriteBytes(conn net.Conn, message []byte, interruptor func() bool) error {
+// WriteBytes needs a interruptor func to execute between Write() calls.
+func (session *ConnSession) WriteBytes(message []byte, interruptor interruptorFunc) error {
 	written := 0
 	for written < len(message) {
-		i, err := conn.Write(message[written:])
+		i, err := session.Conn.Write(message[written:])
 		if err != nil {
 			return err
 		}
 		written += i
-		if interruptor != nil && !interruptor() {
-			return &sharedInterrupted
+		if interruptor != nil {
+			if err := interruptor(session); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func ReadMessage(conn net.Conn, buffer []byte, interruptor func() bool) (uint32, error) {
-	if err := ReadBytes(conn, buffer[:4], interruptor); err != nil {
+func (session *ConnSession) ReadMessage(buffer []byte, interruptor interruptorFunc) (uint32, error) {
+	if err := session.ReadBytes(buffer[:4], interruptor); err != nil {
 		return 0, err
 	}
 	var l uint32
@@ -64,7 +72,7 @@ func ReadMessage(conn net.Conn, buffer []byte, interruptor func() bool) (uint32,
 	} else {
 		l = binary.LittleEndian.Uint32(buffer[:4])
 	}
-	if err := ReadBytes(conn, buffer[:l], interruptor); err != nil {
+	if err := session.ReadBytes(buffer[:l], interruptor); err != nil {
 		return 0, err
 	}
 	return l, nil

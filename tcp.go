@@ -13,18 +13,25 @@ type ConnSession struct {
 	Conn                   net.Conn
 	connUserClose          chan struct{}
 	internalConnErrorClose chan struct{}
-	isClosingConn          chan struct{}
+	closingRS              chan struct{}
 	closing                *sync.WaitGroup
+	sendingQueue           chan []byte
+	recevingQueue          chan []byte
 }
 
 func (conn *ConnSession) Init() {
 	conn.connUserClose = make(chan struct{})
 	conn.internalConnErrorClose = make(chan struct{})
-	conn.isClosingConn = make(chan struct{})
+	conn.closingRS = make(chan struct{})
 	conn.closing = &sync.WaitGroup{}
 }
 
 func (conn *ConnSession) SetupConn(c net.Conn) {
+	if conn.Conn != nil {
+		conn.sendingQueue = nil
+		conn.recevingQueue = nil
+		conn.Init()
+	}
 	conn.Conn = c
 }
 
@@ -37,7 +44,7 @@ func (conn *ConnSession) RequestClose() {
 }
 
 func (conn *ConnSession) SafeWaitClose() {
-	close(conn.isClosingConn)
+	close(conn.closingRS)
 	conn.Conn.SetDeadline(time.Now())
 	if SpamLogger != nil {
 		SpamLogger(fmt.Sprintf("[CONN] %s is waiting for all closing units.", conn.Remote()))
@@ -69,45 +76,10 @@ func (conn *ConnSession) WaitAnyClose() {
 // Sender opens goroutine to do sending work.
 // Buffered Sender introduce a small interval between network sending tp cache data to send at once. May provide slight more cpu efficiency and cause some delay.
 func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) chan []byte {
-	var pipe = make(chan []byte, chanSize)
-	var trySendAll = func() {
-	ending:
-		for {
-			select {
-			case msg := <-pipe:
-				if err := WriteBytes(conn.Conn, msg, nil); err != nil {
-					break ending
-				}
-			default:
-				break ending
-			}
-		}
+	if conn.sendingQueue != nil {
+		panic("Multiple Sender opened")
 	}
-
-	var interruptor = func() bool {
-		select {
-		case <-conn.connUserClose:
-			if InfoLogger != nil {
-				InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing sender for %s.\n", conn.Remote()))
-			}
-			trySendAll()
-			if OnSenderUserClosed != nil {
-				OnSenderUserClosed(conn)
-			}
-			return false
-		case <-conn.internalConnErrorClose:
-			if InfoLogger != nil {
-				InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
-			}
-			trySendAll()
-			if OnSenderErrorClosed != nil {
-				OnSenderErrorClosed(conn)
-			}
-			return false
-		default:
-			return true
-		}
-	}
+	conn.sendingQueue = make(chan []byte, chanSize)
 
 	if !buffered {
 		conn.closing.Add(1)
@@ -117,7 +89,6 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 			}()
 			if InfoLogger != nil {
 				InfoLogger(fmt.Sprintf("[CONN] Sender for %s is up.\n", conn.Remote()))
-
 				defer InfoLogger(fmt.Sprintf("[CONN] Sender for %s is down!\n", conn.Remote()))
 			}
 
@@ -125,58 +96,38 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 				// Wait until the conn has a message to send or any closing operation
 				select {
 				case <-conn.connUserClose:
-					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing sender for %s.\n", conn.Remote()))
-					}
-					trySendAll()
-					if OnSenderUserClosed != nil {
-						OnSenderUserClosed(conn)
-					}
+					defaultOnUserClosingSender(conn)
 					return
 				case <-conn.internalConnErrorClose:
-					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
-					}
-					trySendAll()
-					if OnSenderErrorClosed != nil {
-						OnSenderErrorClosed(conn)
-					}
+					defaultOnErrorClosingSender(conn)
 					return
-				case msg := <-pipe:
+				case msg := <-conn.sendingQueue:
 					// After getting the message to send, still
-					select {
-					case <-conn.connUserClose:
-						if InfoLogger != nil {
-							InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing sender for %s.\n", conn.Remote()))
+
+					err := conn.WriteBytes(msg, defaultSenderInterruptor)
+					if err != nil {
+						// Check if the error is our custom interrupt error
+						switch err {
+						case &sharedInterruptedByError:
+							defaultOnErrorClosingSender(conn)
+							return
+						case &sharedInterruptedByUser:
+							defaultOnUserClosingSender(conn)
+							return
+						default:
 						}
-						trySendAll()
-						if OnSenderUserClosed != nil {
-							OnSenderUserClosed(conn)
+
+						// Handle the error if it's a timeout we triggered
+						if handleClosingTimedout(conn, err, defaultOnUserClosingSender, defaultOnErrorClosingSender) {
+							return
 						}
-						return
-					case <-conn.internalConnErrorClose:
-						if InfoLogger != nil {
-							InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
-						}
-						trySendAll()
+
+						// Unexpected networking errors...
+						conn.errorClose(err, "sending")
 						if OnSenderErrorClosed != nil {
 							OnSenderErrorClosed(conn)
 						}
 						return
-					default:
-						err := WriteBytes(conn.Conn, msg, interruptor)
-						if err != nil {
-							if _, ok := <-conn.isClosingConn; !ok {
-								if err.(net.Error).Timeout() {
-									continue
-								}
-							}
-							conn.errorClose(err, "sending")
-							if OnSenderErrorClosed != nil {
-								OnSenderErrorClosed(conn)
-							}
-							return
-						}
 					}
 				}
 			}
@@ -204,24 +155,12 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 				for {
 					select {
 					case <-conn.connUserClose:
-						if InfoLogger != nil {
-							InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing sender for %s.\n", conn.Remote()))
-						}
-						trySendAll()
-						if OnSenderUserClosed != nil {
-							OnSenderUserClosed(conn)
-						}
+						defaultOnUserClosingSender(conn)
 						return
 					case <-conn.internalConnErrorClose:
-						if InfoLogger != nil {
-							InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
-						}
-						trySendAll()
-						if OnSenderErrorClosed != nil {
-							OnSenderErrorClosed(conn)
-						}
+						defaultOnErrorClosingSender(conn)
 						return
-					case msg := <-pipe:
+					case msg := <-conn.sendingQueue:
 						if sendBuffer.Cap()-sendBuffer.Len() < len(msg) {
 							cachedMsgBeforeFlushing = msg
 							break buffering
@@ -235,7 +174,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 								return
 							}
 							if written != len(msg) {
-								conn.errorClose(err, "written bytes mismatch")
+								conn.errorClose(err, "buffered bytes mismatch")
 								if OnSenderErrorClosed != nil {
 									OnSenderErrorClosed(conn)
 								}
@@ -244,7 +183,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 						}
 					case <-timeout.C:
 						if sendBuffer.Len() == 0 {
-							msg := <-pipe
+							msg := <-conn.sendingQueue
 							written, err := sendBuffer.Write(msg)
 							if err != nil {
 								conn.errorClose(err, "writing to send buffer")
@@ -254,7 +193,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 								return
 							}
 							if written != len(msg) {
-								conn.errorClose(err, "written bytes mismatch")
+								conn.errorClose(err, "buffered  bytes mismatch")
 								if OnSenderErrorClosed != nil {
 									OnSenderErrorClosed(conn)
 								}
@@ -265,14 +204,26 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 					}
 				}
 
-				err := WriteBytes(conn.Conn, sendBuffer.Next(sendBuffer.Len()), interruptor)
+				err := conn.WriteBytes(sendBuffer.Next(sendBuffer.Len()), defaultSenderInterruptor)
 				if err != nil {
-					if _, ok := <-conn.isClosingConn; !ok {
-						if err.(net.Error).Timeout() {
-							continue
-						}
+					// Check if the error is our custom interrupt error
+					switch err {
+					case &sharedInterruptedByError:
+						defaultOnErrorClosingSender(conn)
+						return
+					case &sharedInterruptedByUser:
+						defaultOnUserClosingSender(conn)
+						return
+					default:
 					}
-					conn.errorClose(err, "written bytes mismatch")
+
+					// Handle the error if it's a timeout we triggered
+					if handleClosingTimedout(conn, err, defaultOnUserClosingSender, defaultOnErrorClosingSender) {
+						return
+					}
+
+					// Unexpected networking errors...
+					conn.errorClose(err, "writing bytes")
 					if OnSenderErrorClosed != nil {
 						OnSenderErrorClosed(conn)
 					}
@@ -287,13 +238,15 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 		}()
 
 	}
-	return pipe
+	return conn.sendingQueue
 }
 
 func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, discardMessage bool) chan []byte {
-	var pipe chan []byte
+	if conn.recevingQueue != nil {
+		panic("Multiple receiver opened")
+	}
 	if !discardMessage {
-		pipe = make(chan []byte, chanSize)
+		conn.recevingQueue = make(chan []byte, chanSize)
 	}
 	if !buffered {
 		go func() {
@@ -305,45 +258,28 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				InfoLogger(fmt.Sprintf("[CONN] Receiver of %s is up", conn.Remote()))
 				defer InfoLogger(fmt.Sprintf("[CONN] Receiver of %s is down!", conn.Remote()))
 			}
-			var shouldContinue = func() bool {
-				select {
-				case <-conn.connUserClose:
-					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN > R] Signaled. Closing receiver for %s.\n", conn.Remote()))
-					}
-					if OnReceiverUserClosed != nil {
-						OnReceiverUserClosed(conn)
-					}
-					return false
-				case <-conn.internalConnErrorClose:
-					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN > R] Internal Error Close. Closing Receiver for %s.\n", conn.Remote()))
-					}
-					if OnReceiverErrorClosed != nil {
-						OnReceiverErrorClosed(conn)
-					}
-					return false
-				default:
-					return true
-				}
-			}
 			recvWorkspace := make([]byte, bufferSize)
 			for {
-				if !shouldContinue() {
-					return
+				select {
+				case <-conn.connUserClose:
+					defaultOnUserClosingReceiver(conn)
+				case <-conn.internalConnErrorClose:
+					defaultOnErrorClosingReceiver(conn)
+				default:
 				}
-				receivedLength, err := ReadMessage(conn.Conn, recvWorkspace, shouldContinue)
+				receivedLength, err := conn.ReadMessage(recvWorkspace, defaultReceiverInterruptor)
 				if SpamLogger != nil {
 					SpamLogger(fmt.Sprintf("[CONN] Receiver read a message of length: %d", receivedLength))
 				}
-				if !shouldContinue() {
-					return
-				}
-				if err != nil && err != &sharedInterrupted {
-					if _, ok := <-conn.isClosingConn; !ok {
-						if err.(net.Error).Timeout() {
-							continue
-						}
+				switch err {
+				case &sharedInterruptedByUser:
+					defaultOnUserClosingReceiver(conn)
+				case &sharedInterruptedByError:
+					defaultOnErrorClosingReceiver(conn)
+				case nil:
+				default:
+					if handleClosingTimedout(conn, err, defaultOnUserClosingReceiver, defaultOnErrorClosingReceiver) {
+						return
 					}
 					conn.errorClose(err, "reading message")
 					if OnReceiverErrorClosed != nil {
@@ -351,14 +287,16 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 					}
 					return
 				}
+
 				if discardMessage {
 					continue
 				}
+
 				msg := make([]byte, receivedLength)
 				copy(msg, recvWorkspace[:receivedLength])
-				pipe <- msg
+				conn.recevingQueue <- msg
 				if SpamLogger != nil {
-					SpamLogger(fmt.Sprintf("[CONN] Receiver piped a message."))
+					SpamLogger(fmt.Sprintf("[CONN] Receiver piped a message of length: %d.", len(msg)))
 				}
 			}
 		}()
@@ -431,7 +369,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				for buffered < read {
 					w, err := recvBuffer.Write(recvWorkspace[buffered:read])
 					if err != nil {
-						if _, ok := <-conn.isClosingConn; !ok {
+						if _, ok := <-conn.closingRS; !ok {
 							if err.(net.Error).Timeout() {
 								continue
 							}
@@ -456,29 +394,10 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				conn.closing.Add(1)
 				defer func() {
 					conn.closing.Done()
-				}()
-				var shouldContinue = func() bool {
-					select {
-					case <-conn.connUserClose:
-						if InfoLogger != nil {
-							InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing resolver for %s.\n", conn.Remote()))
-						}
-						if OnReceiverUserClosed != nil {
-							OnReceiverUserClosed(conn)
-						}
-						return false
-					case <-conn.internalConnErrorClose:
-						if InfoLogger != nil {
-							InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing resolver for %s.\n", conn.Remote()))
-						}
-						if OnReceiverUserClosed != nil {
-							OnReceiverErrorClosed(conn)
-						}
-						return false
-					default:
-						return true
+					if InfoLogger != nil {
+						InfoLogger(fmt.Sprintf("[CONN] Resoler for %s is closed.", conn.Remote()))
 					}
-				}
+				}()
 				msgWorkspace := make([]byte, bufferSize)
 				for {
 					read := 0
@@ -489,7 +408,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 							return
 						}
 						read += r
-						if !shouldContinue() {
+						if !defaultSafetySelect(conn) {
 							return
 						}
 					}
@@ -507,7 +426,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 							return
 						}
 						read += r
-						if !shouldContinue() {
+						if !defaultSafetySelect(conn) {
 							return
 						}
 					}
@@ -521,11 +440,11 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 
 					msg := make([]byte, msgLength)
 					copy(msg, msgWorkspace)
-					pipe <- msg
+					conn.recevingQueue <- msg
 				}
 			}()
 		}
 	}
-	return pipe
+	return conn.recevingQueue
 
 }
