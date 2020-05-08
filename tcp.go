@@ -271,6 +271,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				if SpamLogger != nil {
 					SpamLogger(fmt.Sprintf("[CONN] Receiver read a message of length: %d", receivedLength))
 				}
+				
 				switch err {
 				case &sharedInterruptedByUser:
 					defaultOnUserClosingReceiver(conn)
