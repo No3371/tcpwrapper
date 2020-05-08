@@ -36,7 +36,13 @@ func (conn *ConnSession) RequestClose() {
 
 func (conn *ConnSession) SafeWaitClose() {
 	conn.closing.Wait()
-	conn.Conn.Close()
+	if InfoLogger != nil {
+		conn.Conn.Close()
+	} else {
+		remote := conn.Remote()
+		conn.Conn.Close()
+		InfoLogger(fmt.Sprintf("[CONN] Conn to %s is closed completedly.", remote))
+	}
 }
 
 func (conn *ConnSession) errorClose(err error, info string) {
@@ -86,7 +92,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 				select {
 				case <-conn.connUserClose:
 					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN > S] Signaled. Closing sender for %s.\n", conn.Remote()))
+						InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing sender for %s.\n", conn.Remote()))
 					}
 					trySendAll()
 					if OnSenderUserClosed != nil {
@@ -95,7 +101,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 					return
 				case <-conn.internalConnErrorClose:
 					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN > S] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
+						InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
 					}
 					trySendAll()
 					if OnSenderErrorClosed != nil {
@@ -107,7 +113,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 					select {
 					case <-conn.connUserClose:
 						if InfoLogger != nil {
-							InfoLogger(fmt.Sprintf("[CONN > S] Signaled. Closing sender for %s.\n", conn.Remote()))
+							InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing sender for %s.\n", conn.Remote()))
 						}
 						trySendAll()
 						if OnSenderUserClosed != nil {
@@ -116,7 +122,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 						return
 					case <-conn.internalConnErrorClose:
 						if InfoLogger != nil {
-							InfoLogger(fmt.Sprintf("[CONN > S] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
+							InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
 						}
 						trySendAll()
 						if OnSenderErrorClosed != nil {
@@ -170,7 +176,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 					select {
 					case <-conn.connUserClose:
 						if InfoLogger != nil {
-							InfoLogger(fmt.Sprintf("[CONN > S] Signaled. Closing sender for %s.\n", conn.Remote()))
+							InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing sender for %s.\n", conn.Remote()))
 						}
 						trySendAll()
 						if OnSenderUserClosed != nil {
@@ -179,7 +185,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 						return
 					case <-conn.internalConnErrorClose:
 						if InfoLogger != nil {
-							InfoLogger(fmt.Sprintf("[CONN > S] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
+							InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing sender for %s.\n", conn.Remote()))
 						}
 						trySendAll()
 						if OnSenderErrorClosed != nil {
@@ -333,11 +339,15 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 			defer func() {
 				conn.closing.Done()
 			}()
+			if InfoLogger != nil {
+				InfoLogger(fmt.Sprintf("\n[CONN] Receiver of %s is up", conn.Remote()))
+				defer InfoLogger(fmt.Sprintf("\n[CONN] Receiver of %s is down!", conn.Remote()))
+			}
 			var shouldContinue = func() bool {
 				select {
 				case <-conn.connUserClose:
 					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN > R] Signaled. Closing receiver for %s.\n", conn.Remote()))
+						InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing receiver for %s.\n", conn.Remote()))
 					}
 					if OnReceiverUserClosed != nil {
 						OnReceiverUserClosed(conn)
@@ -345,7 +355,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 					return false
 				case <-conn.internalConnErrorClose:
 					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN > R] Internal Error Close. Closing Receiver for %s.\n", conn.Remote()))
+						InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing Receiver for %s.\n", conn.Remote()))
 					}
 					if OnReceiverUserClosed != nil {
 						OnReceiverErrorClosed(conn)
@@ -356,10 +366,6 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 				}
 			}
 			recvWorkspace := make([]byte, bufferSize)
-			if InfoLogger != nil {
-				InfoLogger(fmt.Sprintf("\n[CONN] Receiver of %s is up", conn.Remote()))
-				defer InfoLogger(fmt.Sprintf("\n[CONN] Receiver of %s is down!", conn.Remote()))
-			}
 			for {
 				if !shouldContinue() {
 					return
@@ -377,6 +383,9 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 				}
 
 				for recvBuffer.Cap()-recvBuffer.Len() < read {
+					if SpamLogger != nil {
+						SpamLogger(fmt.Sprintf("[CONN] Receiver is waiting for buffer being resolved"))
+					}
 					waitingForBuffer <- struct{}{}
 					if !shouldContinue() {
 						return
@@ -408,7 +417,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 				select {
 				case <-conn.connUserClose:
 					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN > R] Signaled. Closing resolver for %s.\n", conn.Remote()))
+						InfoLogger(fmt.Sprintf("[CONN] Signaled. Closing resolver for %s.\n", conn.Remote()))
 					}
 					if OnReceiverUserClosed != nil {
 						OnReceiverUserClosed(conn)
@@ -416,7 +425,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 					return false
 				case <-conn.internalConnErrorClose:
 					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN > R] Internal Error Close. Closing resolver for %s.\n", conn.Remote()))
+						InfoLogger(fmt.Sprintf("[CONN] Internal Error Close. Closing resolver for %s.\n", conn.Remote()))
 					}
 					if OnReceiverUserClosed != nil {
 						OnReceiverErrorClosed(conn)
@@ -460,6 +469,9 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int) c
 				}
 				select {
 				case <-waitingForBuffer:
+					if SpamLogger != nil {
+						SpamLogger(fmt.Sprintf("[CONN] Resolver notified the buffer is resolved"))
+					}
 				default:
 				}
 
