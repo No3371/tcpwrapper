@@ -72,6 +72,16 @@ func (conn *ConnSession) WaitAnyClose() {
 	case <-conn.internalConnErrorClose:
 	}
 }
+func (conn *ConnSession) CheckAnyClose() (closed bool) {
+	select {
+	case <-conn.connUserClose:
+		return true
+	case <-conn.internalConnErrorClose:
+		return true
+	default:
+		return false
+	}
+}
 
 // Sender opens goroutine to do sending work.
 // Buffered Sender introduce a small interval between network sending tp cache data to send at once. May provide slight more cpu efficiency and cause some delay.
