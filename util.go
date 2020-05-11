@@ -109,7 +109,7 @@ func defaultOnErrorClosingReceiver(session *ConnSession) {
 func handleClosingTimedout(session *ConnSession, err error, userClosingHandler sessionHandler, errorClosingHandler sessionHandler) (handled bool) {
 	// We may set the deadline of the net.Conn so it unblocks from the net.Conn.Write() in order to gracefully close the session.
 	// We assure here that the timeout error is caused by our logic.
-	if !err.(net.Error).Timeout() {
+	if netError, isNetError := err.(net.Error); !isNetError || !netError.Timeout() {
 		return false
 	}
 	if LowSpamLogger != nil {
