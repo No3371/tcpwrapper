@@ -75,6 +75,12 @@ func (session *ConnSession) WriteBytes(message []byte, interruptor interruptorFu
 	return nil
 }
 
+// MakeMessage prepend the length before the message, the workspace must be at least 4 bytes long then the message
+func MakeMessage(message []byte, workspace []byte) {
+	binary.BigEndian.PutUint32(workspace, uint32(len(message)))
+	copy(workspace[4:], message)
+}
+
 func (session *ConnSession) ReadMessage(buffer []byte, interruptor interruptorFunc) (uint32, error) {
 	if err := session.ReadBytes(buffer[:4], interruptor); err != nil {
 		if LowSpamLogger != nil {

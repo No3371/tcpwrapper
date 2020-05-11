@@ -80,6 +80,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 		panic("Multiple Sender opened")
 	}
 	conn.sendingQueue = make(chan []byte, chanSize)
+	msgWorkspace := make([]byte, 4+bufferSize)
 
 	if !buffered {
 		conn.closing.Add(1)
@@ -102,7 +103,8 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 					defaultOnErrorClosingSender(conn)
 					return
 				case msg := <-conn.sendingQueue:
-					err := conn.WriteBytes(msg, defaultSenderInterruptor)
+					MakeMessage(msg, msgWorkspace)
+					err := conn.WriteBytes(msgWorkspace[:4+len(msg)], defaultSenderInterruptor)
 					if err != nil {
 						// Check if the error is our custom interrupt error
 						switch err {
@@ -162,11 +164,31 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 						defaultOnErrorClosingSender(conn)
 						return
 					case msg := <-conn.sendingQueue:
-						if sendBuffer.Cap()-sendBuffer.Len() < len(msg) {
+						if sendBuffer.Cap()-sendBuffer.Len() < len(msg)+4 {
 							cachedMsgBeforeFlushing = msg
 							break buffering
 						} else {
-							written, err := sendBuffer.Write(msg)
+							binary.BigEndian.PutUint32(msgWorkspace, uint32(len(msg)))
+							written, err := sendBuffer.Write(msgWorkspace[:4])
+							if err != nil {
+								if defaultSafetySelect(conn) {
+									conn.errorClose(err, "writing to send buffer")
+									if OnSenderErrorClosed != nil {
+										OnSenderErrorClosed(conn)
+									}
+								}
+								return
+							}
+							if written != 4 {
+								if defaultSafetySelect(conn) {
+									conn.errorClose(err, "buffered bytes mismatch")
+									if OnSenderErrorClosed != nil {
+										OnSenderErrorClosed(conn)
+									}
+								}
+								return
+							}
+							written, err = sendBuffer.Write(msg)
 							if err != nil {
 								if defaultSafetySelect(conn) {
 									conn.errorClose(err, "writing to send buffer")
@@ -189,7 +211,27 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 					case <-timeout.C:
 						if sendBuffer.Len() == 0 {
 							msg := <-conn.sendingQueue
-							written, err := sendBuffer.Write(msg)
+							binary.BigEndian.PutUint32(msgWorkspace, uint32(len(msg)))
+							written, err := sendBuffer.Write(msgWorkspace[:4])
+							if err != nil {
+								if defaultSafetySelect(conn) {
+									conn.errorClose(err, "writing to send buffer")
+									if OnSenderErrorClosed != nil {
+										OnSenderErrorClosed(conn)
+									}
+								}
+								return
+							}
+							if written != 4 {
+								if defaultSafetySelect(conn) {
+									conn.errorClose(err, "buffered bytes mismatch")
+									if OnSenderErrorClosed != nil {
+										OnSenderErrorClosed(conn)
+									}
+								}
+								return
+							}
+							written, err = sendBuffer.Write(msg)
 							if err != nil {
 								if defaultSafetySelect(conn) {
 									conn.errorClose(err, "writing to send buffer")
@@ -316,7 +358,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 			}
 		}()
 	} else {
-		conn.closing.Add(2)
+		conn.closing.Add(1)
 		recvBuffer := bytes.NewBuffer(make([]byte, 0, bufferSize))
 		waitingForBuffer := make(chan struct{})
 		go func() {
@@ -386,6 +428,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 		}()
 
 		if !discardMessage {
+			conn.closing.Add(1)
 			go func() {
 				defer func() {
 					conn.closing.Done()
