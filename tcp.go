@@ -83,6 +83,30 @@ func (conn *ConnSession) CheckAnyClose() (closed bool) {
 	}
 }
 
+func (conn *ConnSession) SafeRetrieveReceivedMessage(blocking bool) (msg []byte, open bool) {
+	if blocking {
+		select {
+		case <-conn.connUserClose:
+			return nil, false
+		case <-conn.internalConnErrorClose:
+			return nil, false
+		case msg := <-conn.recevingQueue:
+			return msg, true
+		}
+	} else {
+		select {
+		case <-conn.connUserClose:
+			return nil, false
+		case <-conn.internalConnErrorClose:
+			return nil, false
+		case msg := <-conn.recevingQueue:
+			return msg, true
+		default:
+			return nil, true
+		}
+	}
+}
+
 // Sender opens goroutine to do sending work.
 // Buffered Sender introduce a small interval between network sending tp cache data to send at once. May provide slight more cpu efficiency and cause some delay.
 func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) chan []byte {
