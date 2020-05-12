@@ -1,6 +1,7 @@
 package tcpwrapper
 
 import (
+	"errors"
 	"fmt"
 	"net"
 )
@@ -115,7 +116,18 @@ func handleClosingTimedout(session *ConnSession, err error, userClosingHandler s
 	if LowSpamLogger != nil {
 		LowSpamLogger("It's a timeout: %v", err)
 	}
-	if _, ok := <-session.closingRS; !ok {
+
+	select {
+	case _, ok := <-session.closingRS:
+		if ok {
+			if ErrorLogger != nil {
+				ErrorLogger("Received signal from closingRS but it't not closed! This should never happen, contact author.")
+			}
+			if defaultSafetySelect(session) {
+				session.errorClose(errors.New("Received signal from closingRS but it't not closed! This should never happen, contact author."), "handleClosingTimeout()")
+			}
+			return false
+		}
 		if LowSpamLogger != nil {
 			LowSpamLogger("The session is closing: %s", session.Remote())
 		}
@@ -127,6 +139,7 @@ func handleClosingTimedout(session *ConnSession, err error, userClosingHandler s
 			return false
 		}
 		return true
+	default:
+		return false
 	}
-	return false
 }
