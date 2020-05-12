@@ -2,6 +2,7 @@ package tcpwrapper
 
 import (
 	"encoding/binary"
+	"errors"
 )
 
 var ErrorLogger func(v ...interface{})
@@ -18,6 +19,7 @@ var USE_BIG_ENDIAN = true
 
 var sharedInterruptedByUser interrupted = interrupted{e: "interrupted by user"}
 var sharedInterruptedByError interrupted = interrupted{e: "interrupted because of error"}
+var messageSizeBiggerThenBuffer error = errors.New("message size resolved is bigger then using buffer")
 
 type interrupted struct {
 	e string
@@ -88,17 +90,21 @@ func (session *ConnSession) ReadMessage(buffer []byte, interruptor interruptorFu
 		}
 		return 0, err
 	}
-	var l uint32
+	var length uint32
 	if USE_BIG_ENDIAN {
-		l = binary.BigEndian.Uint32(buffer[:4])
+		length = binary.BigEndian.Uint32(buffer[:4])
 	} else {
-		l = binary.LittleEndian.Uint32(buffer[:4])
+		length = binary.LittleEndian.Uint32(buffer[:4])
+	}
+
+	if length > uint32(len(buffer)) {
+		return 4, messageSizeBiggerThenBuffer
 	}
 
 	if LowSpamLogger != nil {
-		LowSpamLogger("ReadBytes(): ", l)
+		LowSpamLogger("ReadBytes(): ", length)
 	}
-	if err := session.ReadBytes(buffer[:l], interruptor); err != nil {
+	if err := session.ReadBytes(buffer[:length], interruptor); err != nil {
 		if LowSpamLogger != nil {
 			LowSpamLogger("ReadMessage() interruptor error: ", err)
 		}
@@ -106,7 +112,7 @@ func (session *ConnSession) ReadMessage(buffer []byte, interruptor interruptorFu
 	}
 
 	if LowSpamLogger != nil {
-		LowSpamLogger("ReadBytes(): %d", l)
+		LowSpamLogger("ReadBytes(): %d", length)
 	}
-	return l, nil
+	return length, nil
 }
