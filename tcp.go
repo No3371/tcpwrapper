@@ -72,6 +72,15 @@ func (conn *ConnSession) WaitAnyClose() {
 	case <-conn.internalConnErrorClose:
 	}
 }
+
+func (conn *ConnSession) WaitAnyCloseWithTimeout(timeout *time.Timer) {
+	select {
+	case <-conn.connUserClose:
+	case <-conn.internalConnErrorClose:
+	case <-timeout.C:
+	}
+}
+
 func (conn *ConnSession) CheckAnyClose() (closed bool) {
 	select {
 	case <-conn.connUserClose:
@@ -79,6 +88,17 @@ func (conn *ConnSession) CheckAnyClose() (closed bool) {
 	case <-conn.internalConnErrorClose:
 		return true
 	default:
+		return false
+	}
+}
+
+func (conn *ConnSession) CheckAnyCloseWithTimeout(timeout *time.Timer) (closed bool) {
+	select {
+	case <-conn.connUserClose:
+		return true
+	case <-conn.internalConnErrorClose:
+		return true
+	case <-timeout.C:
 		return false
 	}
 }
