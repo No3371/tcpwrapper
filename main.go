@@ -16,6 +16,7 @@ var OnSenderErrorClosed func(conn *ConnSession)
 
 var BUFFERED_SEND_INTERVAL_MS uint = 5
 var USE_BIG_ENDIAN = true
+var RAW_STREAM = false
 
 var sharedInterruptedByUser interrupted = interrupted{e: "interrupted by user"}
 var sharedInterruptedByError interrupted = interrupted{e: "interrupted because of error"}

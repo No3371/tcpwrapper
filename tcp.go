@@ -359,6 +359,8 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				defer InfoLogger(fmt.Sprintf("[CONN] Receiver of %s is down!", conn.Remote()))
 			}
 			recvWorkspace := make([]byte, bufferSize)
+			receivedLength := uint32(0)
+			var err error
 			for {
 				select {
 				case <-conn.connUserClose:
@@ -367,9 +369,13 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 					defaultOnErrorClosingReceiver(conn)
 				default:
 				}
-				receivedLength, err := conn.ReadMessage(recvWorkspace, defaultReceiverInterruptor)
-				if SpamLogger != nil {
-					SpamLogger(fmt.Sprintf("[CONN] Receiver read a message of length: %d", receivedLength))
+				if RAW_STREAM {
+					err = conn.ReadBytes(recvWorkspace, defaultReceiverInterruptor)
+				} else {
+					receivedLength, err = conn.ReadMessage(recvWorkspace, defaultReceiverInterruptor)
+					if SpamLogger != nil {
+						SpamLogger(fmt.Sprintf("[CONN] Receiver read a message of length: %d", receivedLength))
+					}
 				}
 
 				if err != nil {
@@ -486,32 +492,45 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				msgWorkspace := make([]byte, bufferSize)
 				for {
 					read := 0
-					for read < 4 {
-						r, err := recvBuffer.Read(msgWorkspace[read:4])
-						if err != nil {
-							if !defaultSafetySelect(conn) {
-								conn.errorClose(err, "resolving buffered bytes")
+					if RAW_STREAM {
+						for read < len(msgWorkspace) {
+							r, err := recvBuffer.Read(msgWorkspace[read:])
+							if err != nil {
+								if !defaultSafetySelect(conn) {
+									conn.errorClose(err, "resolving buffered bytes")
+								}
+								return
 							}
-							return
+							read += r
 						}
-						read += r
-					}
-					var msgLength uint32
-					if USE_BIG_ENDIAN {
-						msgLength = binary.BigEndian.Uint32(msgWorkspace)
 					} else {
-						msgLength = binary.LittleEndian.Uint32(msgWorkspace)
-					}
-					read = 0
-					for uint32(read) < msgLength {
-						r, err := recvBuffer.Read(msgWorkspace[read:msgLength])
-						if err != nil {
-							if !defaultSafetySelect(conn) {
-								conn.errorClose(err, "resolving buffered bytes")
+						for read < 4 {
+							r, err := recvBuffer.Read(msgWorkspace[read:4])
+							if err != nil {
+								if !defaultSafetySelect(conn) {
+									conn.errorClose(err, "resolving buffered bytes")
+								}
+								return
 							}
-							return
+							read += r
 						}
-						read += r
+						var msgLength uint32
+						if USE_BIG_ENDIAN {
+							msgLength = binary.BigEndian.Uint32(msgWorkspace)
+						} else {
+							msgLength = binary.LittleEndian.Uint32(msgWorkspace)
+						}
+						read = 0
+						for uint32(read) < msgLength {
+							r, err := recvBuffer.Read(msgWorkspace[read:msgLength])
+							if err != nil {
+								if !defaultSafetySelect(conn) {
+									conn.errorClose(err, "resolving buffered bytes")
+								}
+								return
+							}
+							read += r
+						}
 					}
 					select {
 					case <-waitingForBuffer:
@@ -521,7 +540,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 					default:
 					}
 
-					msg := make([]byte, msgLength)
+					msg := make([]byte, read)
 					copy(msg, msgWorkspace)
 					conn.recevingQueue <- msg
 				}
