@@ -22,7 +22,7 @@ loop:
 	}
 }
 
-func defaultSenderInterruptor(session *ConnSession) error {
+func DefaultSenderInterruptor(session *ConnSession) error {
 	select {
 	case <-session.connUserClose:
 		return &sharedInterruptedByUser
@@ -33,7 +33,7 @@ func defaultSenderInterruptor(session *ConnSession) error {
 	}
 }
 
-func defaultReceiverInterruptor(session *ConnSession) error {
+func DefaultReceiverInterruptor(session *ConnSession) error {
 	select {
 	case <-session.connUserClose:
 		return &sharedInterruptedByUser

@@ -171,7 +171,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 					return
 				case msg := <-conn.sendingQueue:
 					MakeMessage(msg, msgWorkspace)
-					err := conn.WriteBytes(msgWorkspace[:4+len(msg)], defaultSenderInterruptor)
+					err := conn.WriteBytes(msgWorkspace[:4+len(msg)], DefaultSenderInterruptor)
 					if err != nil {
 						// Check if the error is our custom interrupt error
 						switch err {
@@ -322,7 +322,7 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 					}
 				}
 
-				err := conn.WriteBytes(sendBuffer.Next(sendBuffer.Len()), defaultSenderInterruptor)
+				err := conn.WriteBytes(sendBuffer.Next(sendBuffer.Len()), DefaultSenderInterruptor)
 				if err != nil {
 					// Check if the error is our custom interrupt error
 					switch err {
@@ -390,9 +390,9 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				default:
 				}
 				if RAW_STREAM {
-					err = conn.ReadBytes(recvWorkspace, defaultReceiverInterruptor)
+					err = conn.ReadBytes(recvWorkspace, DefaultReceiverInterruptor)
 				} else {
-					receivedLength, err = conn.ReadMessage(recvWorkspace, defaultReceiverInterruptor)
+					receivedLength, err = conn.ReadMessage(recvWorkspace, DefaultReceiverInterruptor)
 					if SpamLogger != nil {
 						SpamLogger(fmt.Sprintf("[CONN] Receiver read a message of length: %d", receivedLength))
 					}
