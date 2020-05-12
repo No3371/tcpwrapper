@@ -83,6 +83,19 @@ func (conn *ConnSession) CheckAnyClose() (closed bool) {
 	}
 }
 
+func (conn *ConnSession) SafeRetrieveReceivedMessageWithTimeout(timeout *time.Timer) (msg []byte, open bool) {
+	select {
+	case <-conn.connUserClose:
+		return nil, false
+	case <-conn.internalConnErrorClose:
+		return nil, false
+	case msg := <-conn.recevingQueue:
+		return msg, true
+	case <-timeout.C:
+		return nil, true
+	}
+}
+
 func (conn *ConnSession) SafeRetrieveReceivedMessage(blocking bool) (msg []byte, open bool) {
 	if blocking {
 		select {
