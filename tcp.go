@@ -140,6 +140,19 @@ func (conn *ConnSession) CheckAnyCloseWithTimeout(timeout *time.Timer) (closed b
 	}
 }
 
+func (conn *ConnSession) TryQueueMessage(msg []byte) bool {
+	select {
+	case conn.sendingQueue <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
+func (conn *ConnSession) QueueMessage(msg []byte) {
+	conn.sendingQueue <- msg
+}
+
 func (conn *ConnSession) SafeRetrieveReceivedMessageWithTimeout(timeout *time.Timer) (msg []byte, open bool) {
 	select {
 	case <-conn.connUserClose:
@@ -179,7 +192,7 @@ func (conn *ConnSession) SafeRetrieveReceivedMessage(blocking bool) (msg []byte,
 
 // Sender opens goroutine to do sending work.
 // Buffered Sender introduce a small interval between network sending tp cache data to send at once. May provide slight more cpu efficiency and cause some delay.
-func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) chan []byte {
+func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) {
 	if conn.sendingQueue != nil {
 		panic("Multiple Sender opened")
 	}
@@ -395,10 +408,9 @@ func (conn *ConnSession) Sender(chanSize int, buffered bool, bufferSize int) cha
 		}()
 
 	}
-	return conn.sendingQueue
 }
 
-func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, discardMessage bool) chan []byte {
+func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, discardMessage bool) {
 	if conn.recevingQueue != nil {
 		panic("Multiple receiver opened")
 	}
@@ -604,6 +616,4 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 			}()
 		}
 	}
-	return conn.recevingQueue
-
 }
