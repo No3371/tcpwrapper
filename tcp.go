@@ -39,8 +39,45 @@ func (conn *ConnSession) Remote() string {
 	return conn.Conn.RemoteAddr().String()
 }
 
-func (conn *ConnSession) RequestClose() {
-	close(conn.connUserClose)
+func (conn *ConnSession) ForceClose() {
+	defer func() {
+		if err := recover(); err != nil {
+			if InfoLogger != nil {
+				InfoLogger(fmt.Sprintf("[CONN] A panic is recovered in ForceSafeClose() of %s: %s.", conn.Remote(), err))
+			}
+		}
+	}()
+	select {
+	case <-conn.connUserClose:
+	default:
+		close(conn.connUserClose)
+	}
+
+	select {
+	case <-conn.closingRS:
+	default:
+		close(conn.closingRS)
+	}
+	conn.Conn.SetDeadline(time.Now())
+	if InfoLogger == nil {
+		conn.Conn.Close()
+	} else {
+		remote := conn.Remote()
+		conn.Conn.Close()
+		InfoLogger(fmt.Sprintf("[CONN] ForceSafeClose() of %s is completed.", remote))
+	}
+}
+
+func (conn *ConnSession) RequestClose(safe bool) {
+	if safe {
+		select {
+		case <-conn.connUserClose:
+		default:
+			close(conn.connUserClose)
+		}
+	} else {
+		close(conn.connUserClose)
+	}
 }
 
 func (conn *ConnSession) SafeWaitClose() {
