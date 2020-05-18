@@ -432,51 +432,55 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 			var err error
 			for {
 				select {
-				case <-conn.connUserClose:
+				case <-conn.connUserClose: //This means the conn is already started closing by user, we just close this
 					defaultOnUserClosingReceiver(conn)
-				case <-conn.internalConnErrorClose:
+					return
+				case <-conn.internalConnErrorClose: //This means the conn is already started closing by other goroutines, we just close this
 					defaultOnErrorClosingReceiver(conn)
+					return
 				default:
-				}
-				if RAW_STREAM {
-					err = conn.ReadBytes(recvWorkspace, DefaultReceiverInterruptor)
-				} else {
-					receivedLength, err = conn.ReadMessage(recvWorkspace, DefaultReceiverInterruptor)
-					if SpamLogger != nil {
-						SpamLogger(fmt.Sprintf("[CONN] Receiver read a message of length: %d", receivedLength))
+					if RAW_STREAM {
+						err = conn.ReadBytes(recvWorkspace, DefaultReceiverInterruptor)
+					} else {
+						receivedLength, err = conn.ReadMessage(recvWorkspace, DefaultReceiverInterruptor)
+						if SpamLogger != nil {
+							SpamLogger(fmt.Sprintf("[CONN] Receiver read a message of length: %d", receivedLength))
+						}
 					}
-				}
 
-				if err != nil {
-					switch err {
-					case &sharedInterruptedByUser:
-						defaultOnUserClosingReceiver(conn)
-					case &sharedInterruptedByError:
-						defaultOnErrorClosingReceiver(conn)
-					default:
-						if handleClosingTimedout(conn, err, defaultOnUserClosingReceiver, defaultOnErrorClosingReceiver) {
+					if err != nil {
+						switch err {
+						case &sharedInterruptedByUser: //This means the conn is already started closing by user, we just close this
+							defaultOnUserClosingReceiver(conn)
+							return
+						case &sharedInterruptedByError: //This means the conn is already started closing by other goroutines, we just close this
+							defaultOnErrorClosingReceiver(conn)
+							return
+						default:
+							if handleClosingTimedout(conn, err, defaultOnUserClosingReceiver, defaultOnErrorClosingReceiver) { //This means the conn is already started closing by other goroutines, we just close this
+								return
+							}
+							if defaultSafetySelect(conn) {
+								conn.errorClose(err, "reading message") // We raise the closing procedure as this is the first one detecting the error
+								if OnReceiverErrorClosed != nil {
+									OnReceiverErrorClosed(conn)
+								}
+							}
 							return
 						}
-						if defaultSafetySelect(conn) {
-							conn.errorClose(err, "reading message")
-							if OnReceiverErrorClosed != nil {
-								OnReceiverErrorClosed(conn)
-							}
-						}
-						return
+					}
+
+					if discardMessage {
+						continue
+					}
+					msg := make([]byte, receivedLength)
+					copy(msg, recvWorkspace[:receivedLength])
+					conn.recevingQueue <- msg
+					if SpamLogger != nil {
+						SpamLogger(fmt.Sprintf("[CONN] Receiver piped a message of length: %d.", len(msg)))
 					}
 				}
 
-				if discardMessage {
-					continue
-				}
-
-				msg := make([]byte, receivedLength)
-				copy(msg, recvWorkspace[:receivedLength])
-				conn.recevingQueue <- msg
-				if SpamLogger != nil {
-					SpamLogger(fmt.Sprintf("[CONN] Receiver piped a message of length: %d.", len(msg)))
-				}
 			}
 		}()
 	} else {
