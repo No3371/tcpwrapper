@@ -190,11 +190,17 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 							buffer:           bytes.NewBuffer(make([]byte, ew.bufferSize)),
 							pendingMsgToRead: 0,
 						}
+						if LowSpamLogger != nil {
+							LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Added a cs."))
+						}
 					} else {
 						ew.lock.Lock()
 						defer ew.lock.Unlock()
 						delete(ew.inverseMap, e.cs.Conn)
 						ew.Remove(e.cs.Conn)
+						if LowSpamLogger != nil {
+							LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Removed a cs."))
+						}
 					}
 				}
 			}
@@ -218,6 +224,9 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 				ew.readerErrorChan = nil
 				return
 			default:
+				if LowSpamLogger != nil {
+					LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Waiting on epoll."))
+				}
 				conns, err := ew.WaitWithBuffer()
 				if err != nil {
 					if err.Error() != "bad file descriptor" {
@@ -228,8 +237,8 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 					continue
 				}
 				dispatched := new(sync.WaitGroup)
-				if SpamLogger != nil {
-					SpamLogger(fmt.Sprintf("[CONN-EPOLL] Dispatching %d conns to be read.", len(conns)))
+				if LowSpamLogger != nil {
+					LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Dispatching %d conns to be read.", len(conns)))
 				}
 				for _, conn := range conns {
 					rOp := &readOperation{
@@ -244,8 +253,8 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 					}
 				}
 				dispatched.Wait()
-				if SpamLogger != nil {
-					SpamLogger(fmt.Sprintf("[CONN-EPOLL] Workers finished reading jobs on %d conns.", len(conns)))
+				if LowSpamLogger != nil {
+					LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Workers finished reading jobs on %d conns.", len(conns)))
 				}
 
 			clearErrorLoop:
