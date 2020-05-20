@@ -18,15 +18,20 @@ type SharedEpollerConnReader struct {
 
 type SharedEpollReceiver struct {
 	epoller.Poller
-	externalEventChan    chan interface{}
-	readerErrorChan      chan *netConnError
-	OnRecv               func(source *ConnSession, msg []byte)
-	inverseMap           map[net.Conn]*ConnSession
-	buffers              map[net.Conn]*bytes.Buffer
-	bufferSize           int
-	pendingRead          chan *readOperation
-	pendingReadMsgLength map[net.Conn]uint32
-	closedSignal         chan struct{}
+	externalEventChan chan interface{}
+	readerErrorChan   chan *netConnError
+	OnRecv            func(source *ConnSession, msg []byte)
+	inverseMap        map[net.Conn]*ncProfile
+	bufferSize        int
+	pendingRead       chan *readOperation
+	closedSignal      chan struct{}
+	lock              *sync.Mutex
+}
+
+type ncProfile struct {
+	inverseRef       *ConnSession
+	buffer           *bytes.Buffer
+	pendingMsgToRead uint32
 }
 
 func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
@@ -38,7 +43,16 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 				case <-secr.closedSignal:
 					return
 				case rOp := <-secr.pendingRead:
-					cBuf := secr.buffers[rOp.conn]
+					secr.lock.Lock()
+					prof, exist := secr.inverseMap[rOp.conn]
+					if !exist {
+						if ErrorLogger != nil {
+							ErrorLogger("Failed to get the nc profile from a pending read subject: %s", rOp.conn.RemoteAddr().String())
+						}
+						continue
+					}
+					secr.lock.Unlock()
+					cBuf := prof.buffer
 				read_more:
 					r, err := rOp.conn.Read(tmpReadBuffer)
 					if err != nil {
@@ -53,7 +67,7 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 						goto read_more
 					}
 
-					if pl := secr.pendingReadMsgLength[rOp.conn]; pl != 0 {
+					if pl := prof.pendingMsgToRead; pl != 0 {
 						read := 0
 						for uint32(read) < pl {
 							r, err := cBuf.Read(tmpReadBuffer[read:pl])
@@ -65,7 +79,7 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 						}
 						msg := make([]byte, read)
 						copy(msg, tmpReadBuffer[:read])
-						secr.OnRecv(secr.inverseMap[rOp.conn], msg)
+						secr.OnRecv(prof.inverseRef, msg)
 					}
 
 					for cBuf.Len() > 4 {
@@ -86,10 +100,10 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 						}
 						length := binary.BigEndian.Uint32(tmpReadBuffer[:4])
 						if uint32(cBuf.Len()) < length {
-							secr.pendingReadMsgLength[rOp.conn] = length
+							prof.pendingMsgToRead = length
 							break
 						} else {
-							secr.pendingReadMsgLength[rOp.conn] = 0
+							prof.pendingMsgToRead = 0
 						}
 
 						read := 0
@@ -103,7 +117,7 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 						}
 						msg := make([]byte, read)
 						copy(msg, tmpReadBuffer[:read])
-						secr.OnRecv(secr.inverseMap[rOp.conn], msg)
+						secr.OnRecv(prof.inverseRef, msg)
 					}
 
 					rOp.wg.Done()
@@ -126,10 +140,10 @@ func NewSharedEpollReceiver(count int, eventChanSize int, recvChanSize int, buff
 		externalEventChan: make(chan interface{}, eventChanSize),
 		readerErrorChan:   make(chan *netConnError, count),
 		OnRecv:            onRecv,
-		inverseMap:        make(map[net.Conn]*ConnSession),
-		buffers:           make(map[net.Conn]*bytes.Buffer),
+		inverseMap:        make(map[net.Conn]*ncProfile),
 		bufferSize:        bufferSize,
 		pendingRead:       make(chan *readOperation, count),
+		lock:              new(sync.Mutex),
 	}
 	secr.startDispatchedReader(count)
 	return secr, nil
@@ -156,17 +170,9 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 		closeSingal = make(chan struct{})
 	}
 	go func() {
-		defer func() {
-			if err := recover(); err != nil {
-				if ErrorLogger != nil {
-					ErrorLogger("A EpollReceiver->Loop() is exploded! Error: %s", err)
-				}
-			}
-		}()
 		for {
 			select {
 			case <-closeSingal:
-				ew.buffers = nil
 				ew.externalEventChan = nil
 				ew.inverseMap = nil
 				ew.pendingRead = nil
@@ -177,14 +183,40 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 				case epollerCSEvent:
 					if e.eventType {
 						ew.Add(e.cs.Conn)
-						ew.inverseMap[e.cs.Conn] = e.cs
-						ew.buffers[e.cs.Conn] = bytes.NewBuffer(make([]byte, ew.bufferSize))
+						ew.lock.Lock()
+						defer ew.lock.Unlock()
+						ew.inverseMap[e.cs.Conn] = &ncProfile{
+							inverseRef:       e.cs,
+							buffer:           bytes.NewBuffer(make([]byte, ew.bufferSize)),
+							pendingMsgToRead: 0,
+						}
 					} else {
+						ew.lock.Lock()
+						defer ew.lock.Unlock()
 						delete(ew.inverseMap, e.cs.Conn)
-						delete(ew.buffers, e.cs.Conn)
 						ew.Remove(e.cs.Conn)
 					}
 				}
+			}
+		}
+
+	}()
+	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				if ErrorLogger != nil {
+					ErrorLogger("A EpollReceiver->Loop() is exploded! Error: %s", err)
+				}
+			}
+		}()
+		for {
+			select {
+			case <-closeSingal:
+				ew.externalEventChan = nil
+				ew.inverseMap = nil
+				ew.pendingRead = nil
+				ew.readerErrorChan = nil
+				return
 			default:
 				conns, err := ew.WaitWithBuffer()
 				if err != nil {
@@ -223,9 +255,11 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 						if ErrorLogger != nil {
 							ErrorLogger("[EP] An error occured when reading message from %s: %s", e.conn.RemoteAddr().String(), err)
 						}
+						ew.lock.Lock()
+						defer ew.lock.Unlock()
 						ew.Remove(e.conn)
 						if onReadErrorAndRemoved != nil {
-							onReadErrorAndRemoved(ew.inverseMap[e.conn], e.err)
+							onReadErrorAndRemoved(ew.inverseMap[e.conn].inverseRef, e.err)
 						}
 						delete(ew.inverseMap, e.conn)
 					default:
