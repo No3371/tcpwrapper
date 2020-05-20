@@ -156,6 +156,13 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 		closeSingal = make(chan struct{})
 	}
 	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				if ErrorLogger != nil {
+					ErrorLogger("A EpollReceiver->Loop() is exploded! Error: %s", err)
+				}
+			}
+		}()
 		for {
 			select {
 			case <-closeSingal:
@@ -189,6 +196,9 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 					continue
 				}
 				dispatched := new(sync.WaitGroup)
+				if SpamLogger != nil {
+					SpamLogger(fmt.Sprintf("[CONN-EPOLL] Dispatching %d conns to be read.", len(conns)))
+				}
 				for _, conn := range conns {
 					rOp := &readOperation{
 						conn: conn,
@@ -202,6 +212,9 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 					}
 				}
 				dispatched.Wait()
+				if SpamLogger != nil {
+					SpamLogger(fmt.Sprintf("[CONN-EPOLL] Workers finished reading jobs on %d conns.", len(conns)))
+				}
 
 			clearErrorLoop:
 				for {

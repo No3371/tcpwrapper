@@ -23,7 +23,7 @@ func (ss *SharedSender) PendSend(subject *ConnSession, msg []byte) {
 	ss.sendOpQueue <- sOp
 }
 
-func NewSharedSender(queueSize int, ) *SharedSender {
+func NewSharedSender(queueSize int) *SharedSender {
 	ss := &SharedSender{
 		sendOpPool:  &sync.Pool{},
 		sendOpQueue: make(chan *sendOp, queueSize),
@@ -42,6 +42,13 @@ func (ss *SharedSender) Loop(onError func(cs *ConnSession, err error), closeSing
 	}
 	buffer := make([]byte, ss.bufferSize)
 	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				if ErrorLogger != nil {
+					ErrorLogger("A SharedSender->Loop() is exploded! Error: %s", err)
+				}
+			}
+		}()
 		for {
 			select {
 			case <-closeSignal:
