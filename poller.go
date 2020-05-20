@@ -168,9 +168,9 @@ func (ew *SharedEpollReceiver) RequestRemove(cs *ConnSession) {
 
 func (ser *SharedEpollReceiver) innerLoop(onReadErrorAndRemoved func(cs *ConnSession, err error), closeSignal <-chan struct{}) {
 
-	if LowSpamLogger != nil {
-		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Starting epoll loop."))
-	}
+	// if LowSpamLogger != nil {
+	// 	LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Starting epoll loop."))
+	// }
 	defer func() {
 		if err := recover(); err != nil {
 			if ErrorLogger != nil {
@@ -251,9 +251,9 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 		closeSignal = make(chan struct{})
 	}
 
-	if LowSpamLogger != nil {
-		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Starting event loop."))
-	}
+	// if LowSpamLogger != nil {
+	// 	LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Starting event loop."))
+	// }
 	go func() {
 		defer func() {
 			if err := recover(); err != nil {
@@ -297,9 +297,9 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 }
 
 func (ser *SharedEpollReceiver) handleAddEvent(cs *ConnSession) {
-	if LowSpamLogger != nil {
-		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Adding a cs."))
-	}
+	// if LowSpamLogger != nil {
+	// 	LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Adding a cs."))
+	// }
 	ser.Add(cs.Conn)
 	ser.lock.Lock()
 	defer ser.lock.Unlock()
@@ -308,22 +308,22 @@ func (ser *SharedEpollReceiver) handleAddEvent(cs *ConnSession) {
 		buffer:           bytes.NewBuffer(make([]byte, ser.bufferSize)),
 		pendingMsgToRead: 0,
 	}
-	if LowSpamLogger != nil {
-		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Added a cs."))
-	}
+	// if LowSpamLogger != nil {
+	// 	LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Added a cs."))
+	// }
 }
 
 func (ser *SharedEpollReceiver) handleRemoveEvent(cs *ConnSession) {
-	if LowSpamLogger != nil {
-		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Removing a cs."))
-	}
+	// if LowSpamLogger != nil {
+	// 	LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Removing a cs."))
+	// }
 	ser.lock.Lock()
 	defer ser.lock.Unlock()
 	delete(ser.inverseMap, cs.Conn)
 	ser.Remove(cs.Conn)
-	if LowSpamLogger != nil {
-		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Removed a cs."))
-	}
+	// if LowSpamLogger != nil {
+	// 	LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Removed a cs."))
+	// }
 }
 
 func (ser *SharedEpollReceiver) handleReaderError(e *netConnError) {
