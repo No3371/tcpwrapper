@@ -149,7 +149,7 @@ func (ew *SharedEpollReceiver) RequestRemove(cs *ConnSession) {
 	}
 }
 
-func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, err error), closeSingalOverwrite chan struct{}) (closeSingal chan struct{}) {
+func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, err error), closeSingalOverwrite <-chan struct{}) (closeSingal <-chan struct{}) {
 	if closeSingalOverwrite != nil {
 		closeSingal = closeSingalOverwrite
 	} else {

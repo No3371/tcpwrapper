@@ -36,7 +36,7 @@ func NewSharedSender(queueSize int, onError func(cs *ConnSession, err error)) *S
 	return ss
 }
 
-func (ss *SharedSender) Loop(closeSingalOverwrite chan struct{}) (closeSignal chan struct{}) {
+func (ss *SharedSender) Loop(closeSingalOverwrite <-chan struct{}) (closeSignal <-chan struct{}) {
 	if closeSingalOverwrite != nil {
 		closeSignal = closeSingalOverwrite
 	} else {
