@@ -19,7 +19,6 @@ type SharedEpollReceiver struct {
 	inverseMap        map[net.Conn]*ncProfile
 	bufferSize        int
 	pendingRead       chan *readOperation
-	closedSignal      chan struct{}
 	lock              *sync.Mutex
 }
 
@@ -29,13 +28,18 @@ type ncProfile struct {
 	pendingMsgToRead uint32
 }
 
-func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
+func (secr *SharedEpollReceiver) startDispatchedReader(count int, closedSignal <-chan struct{}) {
 	for c := 0; c < count; c++ {
 		tmpReadBuffer := make([]byte, secr.bufferSize)
 		go func() {
+			if err := recover(); err != nil {
+				if ErrorLogger != nil {
+					ErrorLogger("A epoll dispatch reader is exploded! Error: %s", err)
+				}
+			}
 			for {
 				select {
-				case <-secr.closedSignal:
+				case <-closedSignal:
 					return
 				case rOp := <-secr.pendingRead:
 					secr.lock.Lock()
