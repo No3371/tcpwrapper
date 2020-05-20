@@ -130,7 +130,6 @@ func NewSharedEpollReceiver(count int, eventChanSize int, recvChanSize int, buff
 		buffers:           make(map[net.Conn]*bytes.Buffer),
 		bufferSize:        bufferSize,
 		pendingRead:       make(chan *readOperation, count),
-		closedSignal:      make(chan struct{}),
 	}
 	secr.startDispatchedReader(count)
 	return secr, nil
@@ -150,65 +149,76 @@ func (ew *SharedEpollReceiver) RequestRemove(cs *ConnSession) {
 	}
 }
 
-func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, err error)) {
-	for {
-		select {
-		case e := <-ew.externalEventChan:
-			switch e := e.(type) {
-			case epollerCSEvent:
-				if e.eventType {
-					ew.Add(e.cs.Conn)
-					ew.inverseMap[e.cs.Conn] = e.cs
-					ew.buffers[e.cs.Conn] = bytes.NewBuffer(make([]byte, ew.bufferSize))
-				} else {
-					delete(ew.inverseMap, e.cs.Conn)
-					delete(ew.buffers, e.cs.Conn)
-					ew.Remove(e.cs.Conn)
-				}
-			}
-		default:
-			conns, err := ew.WaitWithBuffer()
-			if err != nil {
-				if err.Error() != "bad file descriptor" {
-					if ErrorLogger != nil {
-						ErrorLogger(fmt.Sprintf("failed to poll: %v", err))
+func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, err error)) (closeSingal chan struct{}) {
+	closeSingal = make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-closeSingal:
+				ew.buffers = nil
+				ew.externalEventChan = nil
+				ew.inverseMap = nil
+				ew.pendingRead = nil
+				ew.readerErrorChan = nil
+				return
+			case e := <-ew.externalEventChan:
+				switch e := e.(type) {
+				case epollerCSEvent:
+					if e.eventType {
+						ew.Add(e.cs.Conn)
+						ew.inverseMap[e.cs.Conn] = e.cs
+						ew.buffers[e.cs.Conn] = bytes.NewBuffer(make([]byte, ew.bufferSize))
+					} else {
+						delete(ew.inverseMap, e.cs.Conn)
+						delete(ew.buffers, e.cs.Conn)
+						ew.Remove(e.cs.Conn)
 					}
 				}
-				continue
-			}
-			dispatched := new(sync.WaitGroup)
-			for _, conn := range conns {
-				rOp := &readOperation{
-					conn: conn,
-					wg:   dispatched,
+			default:
+				conns, err := ew.WaitWithBuffer()
+				if err != nil {
+					if err.Error() != "bad file descriptor" {
+						if ErrorLogger != nil {
+							ErrorLogger(fmt.Sprintf("failed to poll: %v", err))
+						}
+					}
+					continue
 				}
-				select {
-				case ew.pendingRead <- rOp:
-				default:
-					ew.startDispatchedReader(10)
-					ew.pendingRead <- rOp
+				dispatched := new(sync.WaitGroup)
+				for _, conn := range conns {
+					rOp := &readOperation{
+						conn: conn,
+						wg:   dispatched,
+					}
+					select {
+					case ew.pendingRead <- rOp:
+					default:
+						ew.startDispatchedReader(10)
+						ew.pendingRead <- rOp
+					}
 				}
-			}
-			dispatched.Wait()
+				dispatched.Wait()
 
-		clearErrorLoop:
-			for {
-				select {
-				case e := <-ew.readerErrorChan:
-					if ErrorLogger != nil {
-						ErrorLogger("[EP] An error occured when reading message from %s: %s", e.conn.RemoteAddr().String(), err)
+			clearErrorLoop:
+				for {
+					select {
+					case e := <-ew.readerErrorChan:
+						if ErrorLogger != nil {
+							ErrorLogger("[EP] An error occured when reading message from %s: %s", e.conn.RemoteAddr().String(), err)
+						}
+						ew.Remove(e.conn)
+						if onReadErrorAndRemoved != nil {
+							onReadErrorAndRemoved(ew.inverseMap[e.conn], e.err)
+						}
+						delete(ew.inverseMap, e.conn)
+					default:
+						break clearErrorLoop
 					}
-					ew.Remove(e.conn)
-					if onReadErrorAndRemoved != nil {
-						onReadErrorAndRemoved(ew.inverseMap[e.conn], e.err)
-					}
-					delete(ew.inverseMap, e.conn)
-				default:
-					break clearErrorLoop
 				}
 			}
 		}
-	}
+	}()
+	return closeSingal
 }
 
 type epollerCSEvent struct {

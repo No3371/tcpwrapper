@@ -41,6 +41,9 @@ func (ss *SharedSender) Loop() (closeSingal chan struct{}) {
 	for {
 		select {
 		case <-closeSingal:
+			close(ss.sendOpQueue)
+			ss.sendOpPool = nil
+			ss.onError = nil
 			return
 		case sOp := <-ss.sendOpQueue:
 			binary.BigEndian.PutUint32(buffer[:4], uint32(len(sOp.msg)))
