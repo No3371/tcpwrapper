@@ -9,6 +9,7 @@ type SharedSender struct {
 	sendOpPool  *sync.Pool
 	sendOpQueue chan *sendOp
 	bufferSize  int
+	onError     func(cs *ConnSession, err error)
 }
 
 type sendOp struct {
@@ -23,10 +24,11 @@ func (ss *SharedSender) PendSend(subject *ConnSession, msg []byte) {
 	ss.sendOpQueue <- sOp
 }
 
-func NewSharedSender(queueSize int) *SharedSender {
+func NewSharedSender(queueSize int, onError func(cs *ConnSession, err error)) *SharedSender {
 	ss := &SharedSender{
 		sendOpPool:  &sync.Pool{},
 		sendOpQueue: make(chan *sendOp, queueSize),
+		onError:     onError,
 	}
 	ss.sendOpPool.New = func() interface{} {
 		return &sendOp{}
@@ -43,7 +45,10 @@ func (ss *SharedSender) Loop() (closeSingal chan struct{}) {
 		case sOp := <-ss.sendOpQueue:
 			binary.BigEndian.PutUint32(buffer[:4], uint32(len(sOp.msg)))
 			copy(buffer[4:], sOp.msg)
-			sOp.subject.WriteBytes(buffer[:len(sOp.msg)+4], nil)
+			err := sOp.subject.WriteBytes(buffer[:len(sOp.msg)+4], nil)
+			if err != nil {
+				ss.onError(sOp.subject, err)
+			}
 		}
 	}
 }
