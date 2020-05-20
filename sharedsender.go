@@ -9,7 +9,6 @@ type SharedSender struct {
 	sendOpPool  *sync.Pool
 	sendOpQueue chan *sendOp
 	bufferSize  int
-	onError     func(cs *ConnSession, err error)
 }
 
 type sendOp struct {
@@ -24,11 +23,10 @@ func (ss *SharedSender) PendSend(subject *ConnSession, msg []byte) {
 	ss.sendOpQueue <- sOp
 }
 
-func NewSharedSender(queueSize int, onError func(cs *ConnSession, err error)) *SharedSender {
+func NewSharedSender(queueSize int, ) *SharedSender {
 	ss := &SharedSender{
 		sendOpPool:  &sync.Pool{},
 		sendOpQueue: make(chan *sendOp, queueSize),
-		onError:     onError,
 	}
 	ss.sendOpPool.New = func() interface{} {
 		return &sendOp{}
@@ -36,7 +34,7 @@ func NewSharedSender(queueSize int, onError func(cs *ConnSession, err error)) *S
 	return ss
 }
 
-func (ss *SharedSender) Loop(closeSingalOverwrite <-chan struct{}) (closeSignal <-chan struct{}) {
+func (ss *SharedSender) Loop(onError func(cs *ConnSession, err error), closeSingalOverwrite <-chan struct{}) (closeSignal <-chan struct{}) {
 	if closeSingalOverwrite != nil {
 		closeSignal = closeSingalOverwrite
 	} else {
@@ -49,14 +47,13 @@ func (ss *SharedSender) Loop(closeSingalOverwrite <-chan struct{}) (closeSignal 
 			case <-closeSignal:
 				close(ss.sendOpQueue)
 				ss.sendOpPool = nil
-				ss.onError = nil
 				return
 			case sOp := <-ss.sendOpQueue:
 				binary.BigEndian.PutUint32(buffer[:4], uint32(len(sOp.msg)))
 				copy(buffer[4:], sOp.msg)
 				err := sOp.subject.WriteBytes(buffer[:len(sOp.msg)+4], nil)
 				if err != nil {
-					ss.onError(sOp.subject, err)
+					onError(sOp.subject, err)
 				}
 			}
 		}
