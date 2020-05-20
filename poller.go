@@ -206,6 +206,7 @@ func (ser *SharedEpollReceiver) innerLoop(onReadErrorAndRemoved func(cs *ConnSes
 					continue
 				}
 				dispatched := new(sync.WaitGroup)
+				dispatched.Add(len(conns))
 				if LowSpamLogger != nil {
 					LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Dispatching %d conns to be read.", len(conns)))
 				}
