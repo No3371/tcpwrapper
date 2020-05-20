@@ -161,7 +161,6 @@ func NewSharedEpollReceiver(count int, eventChanSize int, recvChanSize int, buff
 		pendingRead:       make(chan *readOperation, count),
 		lock:              new(sync.Mutex),
 	}
-	secr.startDispatchedReader(count)
 	return secr, nil
 }
 
@@ -231,7 +230,7 @@ func (ser *SharedEpollReceiver) innerLoop(onReadErrorAndRemoved func(cs *ConnSes
 					select {
 					case ser.pendingRead <- rOp:
 					default:
-						ser.startDispatchedReader(10)
+						ser.startDispatchedReader(10, closeSignal)
 						ser.pendingRead <- rOp
 					}
 				}
@@ -296,6 +295,7 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 						ser.handleAddEvent(e.cs)
 						if !init {
 							init = true
+							ser.startDispatchedReader(128, closeSignal)
 							go ser.innerLoop(onReadErrorAndRemoved, closeSignal)
 						}
 					} else {
