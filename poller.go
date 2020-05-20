@@ -20,7 +20,7 @@ type SharedEpollReceiver struct {
 	epoller.Poller
 	externalEventChan    chan interface{}
 	readerErrorChan      chan *netConnError
-	RecvChan             chan *ReceivedMessage
+	OnRecv               func(source *ConnSession, msg []byte)
 	inverseMap           map[net.Conn]*ConnSession
 	buffers              map[net.Conn]*bytes.Buffer
 	bufferSize           int
@@ -65,11 +65,7 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 						}
 						msg := make([]byte, read)
 						copy(msg, tmpReadBuffer[:read])
-						secr.RecvChan <- &ReceivedMessage{
-							source: secr.inverseMap[rOp.conn],
-							body:   msg,
-						}
-
+						secr.OnRecv(secr.inverseMap[rOp.conn], msg)
 					}
 
 					for cBuf.Len() > 4 {
@@ -107,10 +103,7 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 						}
 						msg := make([]byte, read)
 						copy(msg, tmpReadBuffer[:read])
-						secr.RecvChan <- &ReceivedMessage{
-							source: secr.inverseMap[rOp.conn],
-							body:   msg,
-						}
+						secr.OnRecv(secr.inverseMap[rOp.conn], msg)
 					}
 
 					rOp.wg.Done()
@@ -120,7 +113,7 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 	}
 }
 
-func NewSharedEpollReceiver(count int, eventChanSize int, recvChanSize int, bufferSize int) (ew *SharedEpollReceiver, err error) {
+func NewSharedEpollReceiver(count int, eventChanSize int, recvChanSize int, bufferSize int, onRecv func(source *ConnSession, msg []byte)) (ew *SharedEpollReceiver, err error) {
 	e, err := epoller.NewPollerWithBuffer(count)
 	if err != nil {
 		e, err = epoller.NewPollerWithBuffer(count)
@@ -132,7 +125,7 @@ func NewSharedEpollReceiver(count int, eventChanSize int, recvChanSize int, buff
 		Poller:            e,
 		externalEventChan: make(chan interface{}, eventChanSize),
 		readerErrorChan:   make(chan *netConnError, count),
-		RecvChan:          make(chan *ReceivedMessage, recvChanSize),
+		OnRecv:            onRecv,
 		inverseMap:        make(map[net.Conn]*ConnSession),
 		buffers:           make(map[net.Conn]*bytes.Buffer),
 		bufferSize:        bufferSize,
@@ -222,12 +215,6 @@ type epollerCSEvent struct {
 	cs        *ConnSession
 	eventType bool
 }
-
-type ReceivedMessage struct {
-	source *ConnSession
-	body   []byte
-}
-
 type netConnError struct {
 	conn net.Conn
 	err  error
