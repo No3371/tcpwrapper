@@ -67,16 +67,21 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int, closedSignal <
 						if ErrorLogger != nil {
 							ErrorLogger("A 0 read happended!")
 						}
-						rOp.wg.Done()
-						continue
+					} else {
+						if LowSpamLogger != nil {
+							LowSpamLogger("Read %d bytes, writing to buffer...")
+						}
+						cBuf.Write(tmpReadBuffer[:r])
 					}
-					cBuf.Write(tmpReadBuffer[:r])
 					if r == len(tmpReadBuffer) {
 						goto read_more
 					}
 
 					if pl := prof.pendingMsgToRead; pl != 0 {
 						if uint32(cBuf.Len()) < pl {
+							if LowSpamLogger != nil {
+								LowSpamLogger("Still not enough bytes buffered, skip.")
+							}
 							rOp.wg.Done()
 							continue
 						}
@@ -112,8 +117,14 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int, closedSignal <
 							break
 						}
 						length := binary.BigEndian.Uint32(tmpReadBuffer[:4])
+						if LowSpamLogger != nil {
+							LowSpamLogger("Resolved msg length: ", length)
+						}
 						if uint32(cBuf.Len()) < length {
 							prof.pendingMsgToRead = length
+							if LowSpamLogger != nil {
+								LowSpamLogger("Not enough byte buffered, pend to next time")
+							}
 							break
 						} else {
 							prof.pendingMsgToRead = 0
@@ -127,6 +138,9 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int, closedSignal <
 								err:  err,
 							}
 							read += r
+						}
+						if LowSpamLogger != nil {
+							LowSpamLogger("Read ", read, "bytes and making a message")
 						}
 						msg := make([]byte, read)
 						copy(msg, tmpReadBuffer[:read])
