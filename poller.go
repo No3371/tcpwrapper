@@ -11,11 +11,6 @@ import (
 	"github.com/smallnest/epoller"
 )
 
-type SharedEpollerConnReader struct {
-	closed      chan struct{}
-	pendingRead chan net.Conn
-}
-
 type SharedEpollReceiver struct {
 	epoller.Poller
 	externalEventChan chan interface{}
@@ -49,6 +44,7 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 						if ErrorLogger != nil {
 							ErrorLogger("Failed to get the nc profile from a pending read subject: %s", rOp.conn.RemoteAddr().String())
 						}
+						rOp.wg.Done()
 						continue
 					}
 					secr.lock.Unlock()
@@ -60,6 +56,14 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 							conn: rOp.conn,
 							err:  err,
 						}
+						rOp.wg.Done()
+						continue
+					}
+					if r == 0 {
+						if ErrorLogger != nil {
+							ErrorLogger("A 0 read happended!")
+						}
+						rOp.wg.Done()
 						continue
 					}
 					cBuf.Write(tmpReadBuffer[:r])
@@ -68,6 +72,11 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 					}
 
 					if pl := prof.pendingMsgToRead; pl != 0 {
+						if uint32(cBuf.Len()) < pl {
+							prof.pendingMsgToRead = pl
+							rOp.wg.Done()
+							continue
+						}
 						read := 0
 						for uint32(read) < pl {
 							r, err := cBuf.Read(tmpReadBuffer[read:pl])
@@ -125,8 +134,8 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 			}
 		}()
 	}
-	if LowSpamLogger != nil {
-		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Started %d dispatch worker.", count))
+	if SpamLogger != nil {
+		SpamLogger(fmt.Sprintf("[CONN-EPOLL] Started %d dispatch worker.", count))
 	}
 }
 
