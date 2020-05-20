@@ -194,7 +194,8 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 						if LowSpamLogger != nil {
 							LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Added a cs."))
 						}
-						if init {
+						if !init {
+							init = true
 
 							go func() {
 								defer func() {
