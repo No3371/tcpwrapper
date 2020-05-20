@@ -3,6 +3,7 @@ package tcpwrapper
 import (
 	"encoding/binary"
 	"errors"
+	"net"
 )
 
 var ErrorLogger func(v ...interface{})
@@ -82,6 +83,37 @@ func (session *ConnSession) WriteBytes(message []byte, interruptor interruptorFu
 func MakeMessage(message []byte, workspace []byte) {
 	binary.BigEndian.PutUint32(workspace, uint32(len(message)))
 	copy(workspace[4:], message)
+}
+
+func ReadBytesFromConn(conn net.Conn, dest []byte) error {
+	read := 0
+	for read < len(dest) {
+		i, err := conn.Read(dest[read:])
+		if err != nil {
+			if LowSpamLogger != nil {
+				LowSpamLogger("ReadBytes() error: ", err)
+			}
+			return err
+		}
+		read += i
+	}
+	return nil
+}
+
+func ReadMessageFromConn(conn net.Conn, buffer []byte) (uint32, error) {
+	var length uint32
+	if USE_BIG_ENDIAN {
+		length = binary.BigEndian.Uint32(buffer[:4])
+	} else {
+		length = binary.LittleEndian.Uint32(buffer[:4])
+	}
+	if length > uint32(len(buffer)) {
+		return 4, messageSizeBiggerThenBuffer
+	}
+	if err := ReadBytesFromConn(conn, buffer[:length]); err != nil {
+		return 0, err
+	}
+	return length, nil
 }
 
 func (session *ConnSession) ReadMessage(buffer []byte, interruptor interruptorFunc) (uint32, error) {
