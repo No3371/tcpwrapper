@@ -277,7 +277,7 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 				return
 			case e := <-ser.externalEventChan:
 				switch e := e.(type) {
-				case epollerCSEvent:
+				case *epollerCSEvent:
 					if e.eventType {
 						ser.handleAddEvent(e.cs)
 						if !init {
