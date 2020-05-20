@@ -125,6 +125,9 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 			}
 		}()
 	}
+	if LowSpamLogger != nil {
+		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Started %d dispatch worker.", count))
+	}
 }
 
 func NewSharedEpollReceiver(count int, eventChanSize int, recvChanSize int, bufferSize int, onRecv func(source *ConnSession, msg []byte)) (ew *SharedEpollReceiver, err error) {
@@ -164,6 +167,10 @@ func (ew *SharedEpollReceiver) RequestRemove(cs *ConnSession) {
 }
 
 func (ser *SharedEpollReceiver) innerLoop(onReadErrorAndRemoved func(cs *ConnSession, err error), closeSignal <-chan struct{}) {
+
+	if LowSpamLogger != nil {
+		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Starting epoll loop."))
+	}
 	defer func() {
 		if err := recover(); err != nil {
 			if ErrorLogger != nil {
@@ -238,6 +245,9 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 		closeSignal = make(chan struct{})
 	}
 
+	if LowSpamLogger != nil {
+		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Starting event loop."))
+	}
 	go func() {
 		init := false
 		for {
@@ -270,7 +280,7 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 
 func (ser *SharedEpollReceiver) handleAddEvent(cs *ConnSession) {
 	if LowSpamLogger != nil {
-		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Added a cs."))
+		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Adding a cs."))
 	}
 	ser.Add(cs.Conn)
 	ser.lock.Lock()
