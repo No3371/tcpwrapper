@@ -174,7 +174,7 @@ func (ser *SharedEpollReceiver) innerLoop(onReadErrorAndRemoved func(cs *ConnSes
 	defer func() {
 		if err := recover(); err != nil {
 			if ErrorLogger != nil {
-				ErrorLogger("A EpollReceiver->Loop() is exploded! Error: %s", err)
+				ErrorLogger("A EpollReceiver->innerLoop() is exploded! Error: %s", err)
 			}
 		}
 	}()
@@ -249,6 +249,13 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 		LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Starting event loop."))
 	}
 	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				if ErrorLogger != nil {
+					ErrorLogger("A EpollReceiver->Loop() is exploded! Error: %s", err)
+				}
+			}
+		}()
 		init := false
 		for {
 			select {
