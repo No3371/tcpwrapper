@@ -149,8 +149,12 @@ func (ew *SharedEpollReceiver) RequestRemove(cs *ConnSession) {
 	}
 }
 
-func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, err error)) (closeSingal chan struct{}) {
-	closeSingal = make(chan struct{})
+func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, err error), closeSingalOverwrite chan struct{}) (closeSingal chan struct{}) {
+	if closeSingalOverwrite != nil {
+		closeSingal = closeSingalOverwrite
+	} else {
+		closeSingal = make(chan struct{})
+	}
 	go func() {
 		for {
 			select {

@@ -36,22 +36,30 @@ func NewSharedSender(queueSize int, onError func(cs *ConnSession, err error)) *S
 	return ss
 }
 
-func (ss *SharedSender) Loop() (closeSingal chan struct{}) {
+func (ss *SharedSender) Loop(closeSingalOverwrite chan struct{}) (closeSignal chan struct{}) {
+	if closeSingalOverwrite != nil {
+		closeSignal = closeSingalOverwrite
+	} else {
+		closeSignal = make(chan struct{})
+	}
 	buffer := make([]byte, ss.bufferSize)
-	for {
-		select {
-		case <-closeSingal:
-			close(ss.sendOpQueue)
-			ss.sendOpPool = nil
-			ss.onError = nil
-			return
-		case sOp := <-ss.sendOpQueue:
-			binary.BigEndian.PutUint32(buffer[:4], uint32(len(sOp.msg)))
-			copy(buffer[4:], sOp.msg)
-			err := sOp.subject.WriteBytes(buffer[:len(sOp.msg)+4], nil)
-			if err != nil {
-				ss.onError(sOp.subject, err)
+	go func() {
+		for {
+			select {
+			case <-closeSignal:
+				close(ss.sendOpQueue)
+				ss.sendOpPool = nil
+				ss.onError = nil
+				return
+			case sOp := <-ss.sendOpQueue:
+				binary.BigEndian.PutUint32(buffer[:4], uint32(len(sOp.msg)))
+				copy(buffer[4:], sOp.msg)
+				err := sOp.subject.WriteBytes(buffer[:len(sOp.msg)+4], nil)
+				if err != nil {
+					ss.onError(sOp.subject, err)
+				}
 			}
 		}
-	}
+	}()
+	return closeSignal
 }
