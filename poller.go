@@ -170,6 +170,7 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 		closeSingal = make(chan struct{})
 	}
 	go func() {
+		init := false
 		for {
 			select {
 			case <-closeSingal:
@@ -193,6 +194,80 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 						if LowSpamLogger != nil {
 							LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Added a cs."))
 						}
+						if init {
+
+							go func() {
+								defer func() {
+									if err := recover(); err != nil {
+										if ErrorLogger != nil {
+											ErrorLogger("A EpollReceiver->Loop() is exploded! Error: %s", err)
+										}
+									}
+								}()
+								for {
+									select {
+									case <-closeSingal:
+										ew.externalEventChan = nil
+										ew.inverseMap = nil
+										ew.pendingRead = nil
+										ew.readerErrorChan = nil
+										return
+									default:
+										if LowSpamLogger != nil {
+											LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Waiting on epoll."))
+										}
+										conns, err := ew.WaitWithBuffer()
+										if err != nil {
+											if err.Error() != "bad file descriptor" {
+												if ErrorLogger != nil {
+													ErrorLogger(fmt.Sprintf("failed to poll: %v", err))
+												}
+											}
+											continue
+										}
+										dispatched := new(sync.WaitGroup)
+										if LowSpamLogger != nil {
+											LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Dispatching %d conns to be read.", len(conns)))
+										}
+										for _, conn := range conns {
+											rOp := &readOperation{
+												conn: conn,
+												wg:   dispatched,
+											}
+											select {
+											case ew.pendingRead <- rOp:
+											default:
+												ew.startDispatchedReader(10)
+												ew.pendingRead <- rOp
+											}
+										}
+										dispatched.Wait()
+										if LowSpamLogger != nil {
+											LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Workers finished reading jobs on %d conns.", len(conns)))
+										}
+
+									clearErrorLoop:
+										for {
+											select {
+											case e := <-ew.readerErrorChan:
+												if ErrorLogger != nil {
+													ErrorLogger("[EP] An error occured when reading message from %s: %s", e.conn.RemoteAddr().String(), err)
+												}
+												ew.lock.Lock()
+												defer ew.lock.Unlock()
+												ew.Remove(e.conn)
+												if onReadErrorAndRemoved != nil {
+													onReadErrorAndRemoved(ew.inverseMap[e.conn].inverseRef, e.err)
+												}
+												delete(ew.inverseMap, e.conn)
+											default:
+												break clearErrorLoop
+											}
+										}
+									}
+								}
+							}()
+						}
 					} else {
 						ew.lock.Lock()
 						defer ew.lock.Unlock()
@@ -206,77 +281,6 @@ func (ew *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession, 
 			}
 		}
 
-	}()
-	go func() {
-		defer func() {
-			if err := recover(); err != nil {
-				if ErrorLogger != nil {
-					ErrorLogger("A EpollReceiver->Loop() is exploded! Error: %s", err)
-				}
-			}
-		}()
-		for {
-			select {
-			case <-closeSingal:
-				ew.externalEventChan = nil
-				ew.inverseMap = nil
-				ew.pendingRead = nil
-				ew.readerErrorChan = nil
-				return
-			default:
-				if LowSpamLogger != nil {
-					LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Waiting on epoll."))
-				}
-				conns, err := ew.WaitWithBuffer()
-				if err != nil {
-					if err.Error() != "bad file descriptor" {
-						if ErrorLogger != nil {
-							ErrorLogger(fmt.Sprintf("failed to poll: %v", err))
-						}
-					}
-					continue
-				}
-				dispatched := new(sync.WaitGroup)
-				if LowSpamLogger != nil {
-					LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Dispatching %d conns to be read.", len(conns)))
-				}
-				for _, conn := range conns {
-					rOp := &readOperation{
-						conn: conn,
-						wg:   dispatched,
-					}
-					select {
-					case ew.pendingRead <- rOp:
-					default:
-						ew.startDispatchedReader(10)
-						ew.pendingRead <- rOp
-					}
-				}
-				dispatched.Wait()
-				if LowSpamLogger != nil {
-					LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Workers finished reading jobs on %d conns.", len(conns)))
-				}
-
-			clearErrorLoop:
-				for {
-					select {
-					case e := <-ew.readerErrorChan:
-						if ErrorLogger != nil {
-							ErrorLogger("[EP] An error occured when reading message from %s: %s", e.conn.RemoteAddr().String(), err)
-						}
-						ew.lock.Lock()
-						defer ew.lock.Unlock()
-						ew.Remove(e.conn)
-						if onReadErrorAndRemoved != nil {
-							onReadErrorAndRemoved(ew.inverseMap[e.conn].inverseRef, e.err)
-						}
-						delete(ew.inverseMap, e.conn)
-					default:
-						break clearErrorLoop
-					}
-				}
-			}
-		}
 	}()
 	return closeSingal
 }
