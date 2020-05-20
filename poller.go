@@ -73,7 +73,6 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 
 					if pl := prof.pendingMsgToRead; pl != 0 {
 						if uint32(cBuf.Len()) < pl {
-							prof.pendingMsgToRead = pl
 							rOp.wg.Done()
 							continue
 						}
@@ -89,6 +88,7 @@ func (secr *SharedEpollReceiver) startDispatchedReader(count int) {
 						msg := make([]byte, read)
 						copy(msg, tmpReadBuffer[:read])
 						secr.OnRecv(prof.inverseRef, msg)
+						prof.pendingMsgToRead = 0
 					}
 
 					for cBuf.Len() > 4 {
