@@ -87,7 +87,32 @@ func (ss *SharedSender) Loop(onError func(cs *ConnSession, err error), closeSing
 				close(ss.sendOpQueue)
 				ss.sendOpPool = nil
 				return
-			default:
+			case sOp := <-ss.sendOpQueue:
+				if SenderAnalysis {
+					writeTimeMark = time.Now()
+				}
+				binary.BigEndian.PutUint32(buffer[:4], uint32(len(sOp.msg)))
+				copy(buffer[4:], sOp.msg)
+				err := sOp.subject.WriteBytes(buffer[:len(sOp.msg)+4], nil)
+				if err != nil {
+					onError(sOp.subject, err)
+				}
+				ss.sendOpPool.Put(sOp)
+				if SenderAnalysis {
+					senderAnalysisLock.Lock()
+					if SenderAnalysisSamples == 0 {
+						avgWriteTime = int64(time.Since(writeTimeMark))
+					} else {
+						elapsed := int64(time.Since(writeTimeMark))
+						if elapsed > avgWriteTime {
+							avgWriteTime += elapsed / SenderAnalysisSamples
+						} else if elapsed < avgWaitDrainTime {
+							avgWriteTime -= elapsed / SenderAnalysisSamples
+						}
+					}
+					SenderAnalysisSamples++
+					senderAnalysisLock.Unlock()
+				}
 			innerSend:
 				for {
 					select {
