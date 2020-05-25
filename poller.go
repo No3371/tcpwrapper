@@ -26,41 +26,62 @@ var analysisLock sync.RWMutex
 var createdEpollers *uint32
 var totalMakeMoreWorkerTries int
 
-func init() {
-	if !EpollAnalysis {
-		return
-	}
-	go func() {
-		timeout := time.Second
-		t := time.NewTimer(timeout)
-		lastAvgEWT := avgEpollWaitTime
-		lastAvgOT := avgOtherTime
-		lastAvgWDT := avgWaitDrainTime
-		lastAvgWC := avgWaitedConns
-		lastAvgD := avgDispatched
-		createdEpollers = new(uint32)
-		for {
-			analysisLock.Lock()
-			if lastAvgEWT != avgEpollWaitTime || lastAvgOT != avgOtherTime || lastAvgWDT != avgWaitDrainTime || lastAvgWC != avgWaitedConns || lastAvgD != avgDispatched {
-				log.Printf("[EPOLL-A] AvgEpollWait: %v, AvgOtherTime: %v, AvgWaitDrainTime %v, AvgWaitedConns: %f, AvgDispatched: %f, MakeMoreWorkers: %d, (EpollReceivers: %d)",
-					time.Duration(avgEpollWaitTime),
-					time.Duration(avgOtherTime),
-					time.Duration(avgWaitDrainTime),
-					avgWaitedConns,
-					avgDispatched,
-					totalMakeMoreWorkerTries,
-					atomic.LoadUint32(createdEpollers))
+var GlobalReaderPool = true
+var globalReaderJobQueue chan *readOperation
+var GlobalReaderJobQueueCapacity int = 1024
+var GlobalReaderConcurrency int = 256
+var globalResolveJobQueue chan *readOperation
+var GlobalResolveJobQueueCapacity int = 128
+var GlobalResolverConcurrency int = 4
+var GlobalOnRecv func(source *ConnSession, msg []byte, resolverAsset interface{})
+var GlobalResolverAssetNew func() interface{}
+var GlobalModeBufferSize int = 1024
+var GlobalModeCloseSignal = make(chan struct{})
+
+func Init() {
+	if EpollAnalysis {
+		go func() {
+			timeout := time.Second
+			t := time.NewTimer(timeout)
+			lastAvgEWT := avgEpollWaitTime
+			lastAvgOT := avgOtherTime
+			lastAvgWDT := avgWaitDrainTime
+			lastAvgWC := avgWaitedConns
+			lastAvgD := avgDispatched
+			createdEpollers = new(uint32)
+			for {
+				analysisLock.Lock()
+				if lastAvgEWT != avgEpollWaitTime || lastAvgOT != avgOtherTime || lastAvgWDT != avgWaitDrainTime || lastAvgWC != avgWaitedConns || lastAvgD != avgDispatched {
+					log.Printf("[EPOLL-A] AvgEpollWait: %v, AvgOtherTime: %v, AvgWaitDrainTime %v, AvgWaitedConns: %f, AvgDispatched: %f, MakeMoreWorkers: %d, (EpollReceivers: %d)",
+						time.Duration(avgEpollWaitTime),
+						time.Duration(avgOtherTime),
+						time.Duration(avgWaitDrainTime),
+						avgWaitedConns,
+						avgDispatched,
+						totalMakeMoreWorkerTries,
+						atomic.LoadUint32(createdEpollers))
+				}
+				lastAvgEWT = avgEpollWaitTime
+				lastAvgOT = avgOtherTime
+				lastAvgWDT = avgWaitDrainTime
+				lastAvgWC = avgWaitedConns
+				lastAvgD = avgDispatched
+				analysisLock.Unlock()
+				t.Reset(timeout)
+				<-t.C
 			}
-			lastAvgEWT = avgEpollWaitTime
-			lastAvgOT = avgOtherTime
-			lastAvgWDT = avgWaitDrainTime
-			lastAvgWC = avgWaitedConns
-			lastAvgD = avgDispatched
-			analysisLock.Unlock()
-			t.Reset(timeout)
-			<-t.C
+		}()
+	}
+
+	if GlobalReaderPool {
+		globalReaderJobQueue = make(chan *readOperation, GlobalReaderJobQueueCapacity)
+		globalResolveJobQueue = make(chan *readOperation, GlobalResolveJobQueueCapacity)
+		startGlobalDispatchedReaders(GlobalModeCloseSignal)
+		startGlobalResolvers(GlobalModeCloseSignal)
+		if InfoLogger != nil {
+			InfoLogger("TcpWrapper started in global worker mode.")
 		}
-	}()
+	}
 }
 
 type SharedEpollReceiver struct {
@@ -73,9 +94,9 @@ type SharedEpollReceiver struct {
 	inverseMap         map[net.Conn]*ncProfile
 	bufferSize         int
 	pendingRead        chan *readOperation
-	connIsBeingRead    map[net.Conn]bool
+	connIsOccupied     map[net.Conn]bool
 	pendingReadAgain   map[net.Conn]struct{}
-	finishedRead       chan *readOperation
+	finishedResolve    chan *readOperation
 	lock               *sync.Mutex
 }
 
@@ -83,6 +104,187 @@ type ncProfile struct {
 	inverseRef       *ConnSession
 	buffer           *bytes.Buffer
 	pendingMsgToRead uint32
+}
+
+func startGlobalResolvers(closeSignal <-chan struct{}) {
+
+	for c := 0; c < GlobalResolverConcurrency; c++ {
+		go func() {
+			tmpReadBuffer := make([]byte, GlobalModeBufferSize)
+			var asset interface{}
+			if GlobalResolverAssetNew != nil {
+				asset = GlobalResolverAssetNew()
+			}
+		resolveLoop:
+			for {
+				select {
+				case <-closeSignal:
+					return
+				case rOp := <-globalResolveJobQueue:
+					if LowSpamLogger != nil {
+						LowSpamLogger("Resolving ", rOp.conn.RemoteAddr().String())
+					}
+					if pl := rOp.profile.pendingMsgToRead; pl != 0 {
+						if LowSpamLogger != nil {
+							LowSpamLogger("Found there's a message length pended to be resolve.")
+						}
+						if uint32(rOp.profile.buffer.Len()) < pl {
+							if LowSpamLogger != nil {
+								LowSpamLogger("Still not enough bytes buffered, skip.")
+							}
+
+							continue resolveLoop
+						}
+						read := 0
+						for uint32(read) < pl {
+							r, err := rOp.profile.buffer.Read(tmpReadBuffer[read:pl])
+							if err != nil {
+								rOp.err = err
+								rOp.epoller.finishedResolve <- rOp
+								continue resolveLoop
+							}
+							read += r
+						}
+						msg := make([]byte, read)
+						copy(msg, tmpReadBuffer[:read])
+						GlobalOnRecv(rOp.profile.inverseRef, msg, asset)
+						rOp.profile.pendingMsgToRead = 0
+					}
+
+					for rOp.profile.buffer.Len() > 4 {
+						r, err := rOp.profile.buffer.Read(tmpReadBuffer[:4])
+						if err != nil {
+							rOp.err = err
+							rOp.epoller.finishedResolve <- rOp
+							continue resolveLoop
+						}
+						if r != 4 {
+							rOp.err = errors.New("read from buffer mismatch (4)")
+							rOp.epoller.finishedResolve <- rOp
+							continue resolveLoop
+						}
+						length := binary.BigEndian.Uint32(tmpReadBuffer[:4])
+						// if LowSpamLogger != nil {
+						// 	LowSpamLogger("Resolved msg length: ", length)
+						// }
+
+						if length == 0 {
+							if LowSpamLogger != nil {
+								LowSpamLogger("Read a 0 len msg.")
+							}
+							continue resolveLoop
+						}
+
+						if uint32(rOp.profile.buffer.Len()) < length {
+							rOp.profile.pendingMsgToRead = length
+							if LowSpamLogger != nil {
+								LowSpamLogger("Not enough byte buffered, pend to next time")
+							}
+							continue resolveLoop
+						} else {
+							rOp.profile.pendingMsgToRead = 0
+						}
+
+						read := 0
+						for uint32(read) < length {
+							r, err := rOp.profile.buffer.Read(tmpReadBuffer[read:length])
+							if err != nil {
+								rOp.err = err
+								rOp.epoller.finishedResolve <- rOp
+								continue resolveLoop
+							}
+							read += r
+						}
+						// if LowSpamLogger != nil {
+						// 	LowSpamLogger("Read ", read, "bytes and making a message")
+						// }
+						msg := make([]byte, read)
+						copy(msg, tmpReadBuffer[:read])
+						GlobalOnRecv(rOp.profile.inverseRef, msg, asset)
+					}
+					rOp.epoller.finishedResolve <- rOp
+					if LowSpamLogger != nil {
+						LowSpamLogger("Finished Resolving ", rOp.conn.RemoteAddr().String())
+					}
+				}
+			}
+		}()
+	}
+}
+
+func startGlobalDispatchedReaders(closeSignal <-chan struct{}) {
+	for c := 0; c < GlobalReaderConcurrency; c++ {
+		go func() {
+			if err := recover(); err != nil {
+				if ErrorLogger != nil {
+					ErrorLogger("A epoll dispatch reader is exploded! Error: %s", err)
+				}
+			}
+			tmpReadBuffer := make([]byte, GlobalModeBufferSize)
+		dispatchWorkerLoop:
+			for {
+				select {
+				case <-closeSignal:
+					return
+				case rOp := <-globalReaderJobQueue:
+					if LowSpamLogger != nil {
+						LowSpamLogger("Working to read ", rOp.conn.RemoteAddr().String())
+					}
+					readDeadlineSet := false
+				read_more:
+					if len(tmpReadBuffer) == 0 {
+						if ErrorLogger != nil {
+							ErrorLogger("tmpReadBuffer is 0 length, why?")
+						}
+					}
+					r, err := rOp.conn.Read(tmpReadBuffer)
+					if err != nil {
+						if !readDeadlineSet {
+							rOp.err = err
+							rOp.drainWait <- struct{}{}
+							rOp.epoller.finishedResolve <- rOp
+							continue dispatchWorkerLoop
+						}
+						if nErr, ok := err.(net.Error); ok && nErr.Timeout() {
+							if LowSpamLogger != nil {
+								LowSpamLogger("Unable to read more...")
+							}
+							goto read_more_done
+						}
+					}
+					if r == 0 {
+						if ErrorLogger != nil {
+							ErrorLogger("A 0 read happended!")
+						}
+					} else {
+						rOp.profile.buffer.Write(tmpReadBuffer[:r])
+						// if LowSpamLogger != nil {
+						// 	LowSpamLogger("Read ", r, " bytes, wrote to buffer (", rOp.profile.buffer.Len())
+						// }
+					}
+					if r == len(tmpReadBuffer) {
+						if LowSpamLogger != nil {
+							LowSpamLogger("It's a full read, try to read more, will timeout in 5ms.")
+						}
+						rOp.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 5))
+						readDeadlineSet = true
+						goto read_more
+					} else {
+						rOp.conn.SetReadDeadline(time.Time{})
+					}
+				read_more_done:
+					if LowSpamLogger != nil {
+						LowSpamLogger("Done reading %s, queue to resolve...", rOp.conn.RemoteAddr().String())
+					}
+					rOp.drainWait <- struct{}{}
+					globalResolveJobQueue <- rOp
+				}
+			}
+		}()
+	}
+	if SpamLogger != nil {
+		SpamLogger(fmt.Sprintf("[CONN-EPOLL] Started %d global readers.", GlobalReaderConcurrency))
+	}
 }
 
 func (ser *SharedEpollReceiver) startDispatchedReader(count int, closedSignal <-chan struct{}) {
@@ -113,9 +315,9 @@ func (ser *SharedEpollReceiver) startDispatchedReader(count int, closedSignal <-
 					r, err := rOp.conn.Read(tmpReadBuffer)
 					if err != nil {
 						if !rdlSet {
-							rOp.done = true
 							rOp.err = err
-							ser.finishedRead <- rOp
+
+							ser.finishedResolve <- rOp
 							continue dispatchWorkerLoop
 						}
 						if nErr, ok := err.(net.Error); ok && nErr.Timeout() {
@@ -163,9 +365,8 @@ func (ser *SharedEpollReceiver) startDispatchedReader(count int, closedSignal <-
 						for uint32(read) < pl {
 							r, err := rOp.profile.buffer.Read(tmpReadBuffer[read:pl])
 							if err != nil {
-								rOp.done = true
 								rOp.err = err
-								ser.finishedRead <- rOp
+								ser.finishedResolve <- rOp
 								continue dispatchWorkerLoop
 							}
 							read += r
@@ -180,15 +381,13 @@ func (ser *SharedEpollReceiver) startDispatchedReader(count int, closedSignal <-
 					for rOp.profile.buffer.Len() > 4 {
 						r, err := rOp.profile.buffer.Read(tmpReadBuffer[:4])
 						if err != nil {
-							rOp.done = true
 							rOp.err = err
-							ser.finishedRead <- rOp
+							ser.finishedResolve <- rOp
 							continue dispatchWorkerLoop
 						}
 						if r != 4 {
-							rOp.done = true
 							rOp.err = errors.New("read from buffer mismatch (4)")
-							ser.finishedRead <- rOp
+							ser.finishedResolve <- rOp
 							continue dispatchWorkerLoop
 						}
 						length := binary.BigEndian.Uint32(tmpReadBuffer[:4])
@@ -217,9 +416,8 @@ func (ser *SharedEpollReceiver) startDispatchedReader(count int, closedSignal <-
 						for uint32(read) < length {
 							r, err := rOp.profile.buffer.Read(tmpReadBuffer[read:length])
 							if err != nil {
-								rOp.done = true
 								rOp.err = err
-								ser.finishedRead <- rOp
+								ser.finishedResolve <- rOp
 								continue dispatchWorkerLoop
 							}
 							read += r
@@ -231,9 +429,7 @@ func (ser *SharedEpollReceiver) startDispatchedReader(count int, closedSignal <-
 						copy(msg, tmpReadBuffer[:read])
 						ser.OnRecv(rOp.profile.inverseRef, msg)
 					}
-
-					rOp.done = true
-					ser.finishedRead <- rOp
+					ser.finishedResolve <- rOp
 				}
 			}
 		}()
@@ -259,10 +455,10 @@ func NewSharedEpollReceiver(count int, recvChanSize int, bufferSize int, onRecv 
 		OnRecv:            onRecv,
 		inverseMap:        make(map[net.Conn]*ncProfile),
 		bufferSize:        bufferSize,
-		pendingRead:       make(chan *readOperation, count/2+1),
+		pendingRead:       make(chan *readOperation, count),
 		pendingReadAgain:  make(map[net.Conn]struct{}),
-		connIsBeingRead:   make(map[net.Conn]bool),
-		finishedRead:      make(chan *readOperation, count/2+1),
+		connIsOccupied:    make(map[net.Conn]bool),
+		finishedResolve:   make(chan *readOperation, count),
 		lock:              new(sync.Mutex),
 	}
 	if EpollAnalysis {
@@ -366,11 +562,13 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 			case e := <-ser.externalEventChan:
 				if e.eventType {
 					if !ser.init {
-						if SpamLogger != nil {
-							SpamLogger(fmt.Sprintf("[CONN-EPOLL] Initing default workers."))
-						}
 						ser.init = true
-						ser.startDispatchedReader(ser.size/EpollWorkerRatio, closeSignal)
+						if !GlobalReaderPool {
+							if SpamLogger != nil {
+								SpamLogger(fmt.Sprintf("[CONN-EPOLL] Initing default workers."))
+							}
+							ser.startDispatchedReader(ser.size/EpollWorkerRatio, closeSignal)
+						}
 					}
 					if e.cs == nil {
 						if ErrorLogger != nil {
@@ -383,10 +581,10 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 						buffer:           bytes.NewBuffer(make([]byte, 0, ser.bufferSize)),
 						pendingMsgToRead: 0,
 					}
-					ser.connIsBeingRead[e.cs.Conn] = false
+					ser.connIsOccupied[e.cs.Conn] = false
 					consumedAddEvents++
 				} else {
-					delete(ser.connIsBeingRead, e.cs.Conn)
+					delete(ser.connIsOccupied, e.cs.Conn)
 					delete(ser.inverseMap, e.cs.Conn)
 					if SpamLogger != nil {
 						SpamLogger(fmt.Sprintf("[CONN-EPOLL] Removed %s from this poller.", e.cs.Remote()))
@@ -400,17 +598,17 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 
 		readDoneEvents = 0
 		readDoneErrors = 0
+		if LowSpamLogger != nil {
+			LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Checking resolved conns"))
+		}
 	checkReadDoneLoop:
 		for {
 			select {
-			case e := <-ser.finishedRead:
-				if !e.done {
-					log.Fatalf("A done false finishReadEvent!")
-				}
-				if !ser.connIsBeingRead[e.conn] {
+			case e := <-ser.finishedResolve:
+				if !ser.connIsOccupied[e.conn] {
 					log.Fatalf("The conn is not flagged being read but the poller received a finish event!")
 				}
-				ser.connIsBeingRead[e.conn] = false
+				ser.connIsOccupied[e.conn] = false
 				if e.err != nil {
 					if LowSpamLogger != nil {
 						LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Handling worker error on %s: %s", e.conn.RemoteAddr().String(), e.err))
@@ -431,8 +629,10 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 			}
 		}
 
+		if LowSpamLogger != nil {
+			LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Reading waited conns..."))
+		}
 		waitDrain := make(chan struct{}, len(conns))
-
 		dispatched = 0
 		dispatchedReadAgain = 0
 	readEpolledConns:
@@ -452,7 +652,7 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 				continue readEpolledConns
 			}
 
-			beingRead, registered := ser.connIsBeingRead[conn] // We epoll-waited a conn while it's still bring read
+			beingRead, registered := ser.connIsOccupied[conn] // We epoll-waited a conn while it's still bring read
 			if !registered {
 				log.Fatalf("Not registed beingRead!")
 			}
@@ -467,23 +667,27 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 				continue readEpolledConns
 			} else {
 				rOp := &readOperation{
+					epoller:   ser,
 					conn:      conn,
-					done:      false,
 					profile:   ser.inverseMap[conn],
 					drainWait: waitDrain,
 				}
-				select {
-				case ser.pendingRead <- rOp:
-				default:
-					makeMoreWorkerTries++
-					ser.startDispatchedReader(10, closeSignal)
-					ser.pendingRead <- rOp
+				if GlobalReaderPool {
+					globalReaderJobQueue <- rOp
+				} else {
+					select {
+					case ser.pendingRead <- rOp:
+					default:
+						makeMoreWorkerTries++
+						ser.startDispatchedReader(10, closeSignal)
+						ser.pendingRead <- rOp
+					}
 				}
 				dispatched++
-				if LowSpamLogger != nil {
-					LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Dispatched %s to be read!", conn.RemoteAddr().String()))
-				}
-				ser.connIsBeingRead[conn] = true
+				// if LowSpamLogger != nil {
+				// 	LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Dispatched %s to be read!", conn.RemoteAddr().String()))
+				// }
+				ser.connIsOccupied[conn] = true
 				if _, p := ser.pendingReadAgain[conn]; p {
 					// Is this possible? We epoll-waited the conn again but we have not drain it...?
 					// If it's pending to be read again, this read should drain it, so we remove the flag
@@ -495,32 +699,42 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 			}
 		}
 
+		if LowSpamLogger != nil {
+			LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Reading pending(read-again) conns..."))
+		}
 	doReadAgain:
 		for pendingAgainConn := range ser.pendingReadAgain { // If it's pending to be read again but it's not epoll-waited thsi time (Already epoll-waited in previous loop), we dispatch it to be read too
-			if ser.connIsBeingRead[pendingAgainConn] {
+			if ser.connIsOccupied[pendingAgainConn] {
 				continue doReadAgain
 			}
 			rOp := &readOperation{
+				epoller:   ser,
 				conn:      pendingAgainConn,
-				done:      false,
 				profile:   ser.inverseMap[pendingAgainConn],
 				drainWait: waitDrain,
 			}
-			select {
-			case ser.pendingRead <- rOp:
-			default:
-				makeMoreWorkerTries++
-				ser.startDispatchedReader(10, closeSignal)
-				ser.pendingRead <- rOp
+			if GlobalReaderPool {
+				globalReaderJobQueue <- rOp
+			} else {
+				select {
+				case ser.pendingRead <- rOp:
+				default:
+					makeMoreWorkerTries++
+					ser.startDispatchedReader(10, closeSignal)
+					ser.pendingRead <- rOp
+				}
 			}
 			dispatchedReadAgain++
-			ser.connIsBeingRead[pendingAgainConn] = true
+			ser.connIsOccupied[pendingAgainConn] = true
 			delete(ser.pendingReadAgain, pendingAgainConn)
 		}
 
 		if EpollAnalysis {
 			otherTime += time.Since(otherTimeMark)
 			waitDrainTimeMark = time.Now()
+		}
+		if LowSpamLogger != nil {
+			LowSpamLogger(fmt.Sprintf("[CONN-EPOLL] Waiting for drain signals..."))
 		}
 		for d := 0; d < dispatched+dispatchedReadAgain; d++ {
 			<-waitDrain
@@ -595,9 +809,9 @@ type netConnError struct {
 }
 
 type readOperation struct {
+	epoller   *SharedEpollReceiver
 	conn      net.Conn
 	profile   *ncProfile
-	done      bool
 	drainWait chan struct{}
 	err       error
 }
