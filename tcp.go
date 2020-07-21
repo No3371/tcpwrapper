@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -487,6 +488,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 		conn.closing.Add(1)
 		recvBuffer := bytes.NewBuffer(make([]byte, 0, bufferSize))
 		waitingForBuffer := make(chan struct{})
+		waitingForNewBytes := make(chan struct {})
 		go func() {
 			defer func() {
 				conn.closing.Done()
@@ -549,6 +551,10 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				if SpamLogger != nil {
 					SpamLogger(fmt.Sprintf("[CONN] Receiver wrote %d bytes to buffer", buffered))
 				}
+				select {
+				case <-waitingForNewBytes:
+				default:
+				}
 
 			}
 		}()
@@ -574,22 +580,28 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 						for read < len(msgWorkspace) {
 							r, err := recvBuffer.Read(msgWorkspace[read:])
 							if err != nil {
+								if err == io.EOF {
+									waitingForNewBytes<-struct{}{}
+									continue
+								}
 								if !defaultSafetySelect(conn) {
 									conn.errorClose(err, "resolving buffered bytes")
 								}
-								ErrorLogger(fmt.Sprintf("Resolving error: %s", err))
 								return
 							}
 							read += r
 						}
 					} else {
+						for recvBuffer.Len() < 4 {
+							waitingForNewBytes<-struct{}{}
+							continue
+						}
 						for read < 4 {
 							r, err := recvBuffer.Read(msgWorkspace[read : 4-read])
 							if err != nil {
 								if !defaultSafetySelect(conn) {
 									conn.errorClose(err, "resolving buffered bytes")
 								}
-								ErrorLogger(fmt.Sprintf("Resolving error: %s", err))
 								return
 							}
 							read += r
@@ -601,13 +613,16 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 							msgLength = binary.LittleEndian.Uint32(msgWorkspace)
 						}
 						read = 0
+						for recvBuffer.Len() < int(msgLength) {
+							waitingForNewBytes<-struct{}{}
+							continue
+						}
 						for uint32(read) < msgLength {
 							r, err := recvBuffer.Read(msgWorkspace[read:msgLength])
 							if err != nil {
 								if !defaultSafetySelect(conn) {
 									conn.errorClose(err, "resolving buffered bytes")
 								}
-								ErrorLogger(fmt.Sprintf("Resolving error: %s", err))
 								return
 							}
 							read += r
@@ -620,10 +635,11 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 							SpamLogger(fmt.Sprintf("[CONN] Resolver notified the buffer is resolved"))
 						}
 					default:
-						msg := make([]byte, read)
-						copy(msg, msgWorkspace[:read])
-						conn.recevingQueue <- msg
 					}
+
+					msg := make([]byte, read)
+					copy(msg, msgWorkspace[:read])
+					conn.recevingQueue <- msg
 
 				}
 			}()
