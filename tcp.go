@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"time"
@@ -487,8 +486,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 	} else {
 		conn.closing.Add(1)
 		recvBuffer := bytes.NewBuffer(make([]byte, 0, bufferSize))
-		waitingForBuffer := make(chan struct{})
-		waitingForNewBytes := make(chan struct {})
+		cachedLength := uint32(0)
 		go func() {
 			defer func() {
 				conn.closing.Done()
@@ -498,6 +496,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				defer InfoLogger(fmt.Sprintf("[CONN] Receiver of %s is down!", conn.Remote()))
 			}
 			recvWorkspace := make([]byte, bufferSize)
+			resolveWorkspace := make([]byte, bufferSize)
 			for {
 				if !defaultSafetySelectHandle(conn, defaultOnUserClosingReceiver, defaultOnErrorClosingReceiver) {
 					return
@@ -524,7 +523,6 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 					if SpamLogger != nil {
 						SpamLogger(fmt.Sprintf("[CONN] Receiver is waiting for buffer being resolved"))
 					}
-					waitingForBuffer <- struct{}{}
 					if !defaultSafetySelectHandle(conn, defaultOnUserClosingReceiver, defaultOnErrorClosingReceiver) {
 						return
 					}
@@ -551,101 +549,63 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				if SpamLogger != nil {
 					SpamLogger(fmt.Sprintf("[CONN] Receiver wrote %d bytes to buffer", buffered))
 				}
-				select {
-				case <-waitingForNewBytes:
-				default:
+
+				if cachedLength != 0 {
+					if uint32(recvBuffer.Len()) < cachedLength {
+						continue
+					} else {
+						resolved := uint32(0)
+						for resolved < cachedLength {
+							r, err := recvBuffer.Read(resolveWorkspace[resolved:cachedLength])
+							if err != nil {
+								conn.errorClose(err, "resolving buffered bytes")
+								return
+							}
+							resolved += uint32(r)
+						}
+						msg := make([]byte, read)
+						copy(msg, resolveWorkspace[:resolved])
+						conn.recevingQueue <- msg
+						cachedLength = 0
+					}
 				}
 
+				for recvBuffer.Len() > 4 {
+					resolved := uint32(0)
+					for resolved < 4 {
+						r, err := recvBuffer.Read(resolveWorkspace[resolved:4])
+						if err != nil {
+							if !defaultSafetySelect(conn) {
+								conn.errorClose(err, "resolving buffered bytes")
+							}
+							return
+						}
+						resolved += uint32(r)
+					}
+					var msgLength uint32
+					if USE_BIG_ENDIAN {
+						msgLength = binary.BigEndian.Uint32(resolveWorkspace)
+					} else {
+						msgLength = binary.LittleEndian.Uint32(resolveWorkspace)
+					}
+					if msgLength > uint32(recvBuffer.Len()) {
+						cachedLength = msgLength
+						break
+					} else {
+						for resolved < msgLength {
+							r, err := recvBuffer.Read(resolveWorkspace[resolved:msgLength])
+							if err != nil {
+								conn.errorClose(err, "resolving buffered bytes")
+								return
+							}
+							resolved += uint32(r)
+						}
+						msg := make([]byte, read)
+						copy(msg, resolveWorkspace[:resolved])
+						conn.recevingQueue <- msg
+					}
+				}
 			}
 		}()
-
-		if !discardMessage {
-			conn.closing.Add(1)
-			go func() {
-				if InfoLogger != nil {
-					InfoLogger(fmt.Sprintf("[CONN] Resolver for %s is up.", conn.Remote()))
-				}
-				defer func() {
-					conn.closing.Done()
-					if err := recover(); err != nil {
-						if ErrorLogger != nil {
-							ErrorLogger(fmt.Sprintf("Recovered a panic in resolver: %s", err))
-						}
-					}
-					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN] Resolver for %s is closed.", conn.Remote()))
-					}
-				}()
-				msgWorkspace := make([]byte, bufferSize)
-				for {
-					read := 0
-					if RAW_STREAM {
-						for read < len(msgWorkspace) {
-							r, err := recvBuffer.Read(msgWorkspace[read:])
-							if err != nil {
-								if err == io.EOF {
-									waitingForNewBytes<-struct{}{}
-									continue
-								}
-								if !defaultSafetySelect(conn) {
-									conn.errorClose(err, "resolving buffered bytes")
-								}
-								return
-							}
-							read += r
-						}
-					} else {
-						for recvBuffer.Len() < 4 {
-							waitingForNewBytes<-struct{}{}
-							continue
-						}
-						for read < 4 {
-							r, err := recvBuffer.Read(msgWorkspace[read : 4])
-							if err != nil {
-								if !defaultSafetySelect(conn) {
-									conn.errorClose(err, "resolving buffered bytes")
-								}
-								return
-							}
-							read += r
-						}
-						var msgLength uint32
-						if USE_BIG_ENDIAN {
-							msgLength = binary.BigEndian.Uint32(msgWorkspace)
-						} else {
-							msgLength = binary.LittleEndian.Uint32(msgWorkspace)
-						}
-						read = 0
-						for uint32(recvBuffer.Len()) < msgLength {
-							waitingForNewBytes<-struct{}{}
-							continue
-						}
-						for uint32(read) < msgLength {
-							r, err := recvBuffer.Read(msgWorkspace[read:msgLength])
-							if err != nil {
-								if !defaultSafetySelect(conn) {
-									conn.errorClose(err, "resolving buffered bytes")
-								}
-								return
-							}
-							read += r
-						}
-					}
-
-					select {
-					case <-waitingForBuffer:
-						if SpamLogger != nil {
-							SpamLogger(fmt.Sprintf("[CONN] Resolver notified the buffer is resolved"))
-						}
-					default:
-					}
-
-					msg := make([]byte, read)
-					copy(msg, msgWorkspace[:read])
-					conn.recevingQueue <- msg
-
-				}
-			}()
-		}
 	}
 }
