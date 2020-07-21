@@ -477,10 +477,11 @@ func (ew *SharedEpollReceiver) RequestAdd(cs *ConnSession) bool {
 	return true
 }
 
-func (ew *SharedEpollReceiver) RequestRemove(cs *ConnSession) bool {
+func (ew *SharedEpollReceiver) RequestRemove(cs *ConnSession, doClose bool) bool {
 	e := &epollerCSEvent{
 		cs:        cs,
 		eventType: false,
+		doClose:   doClose,
 	}
 	ew.externalEventChan <- e
 	ew.Remove(cs.Conn)
@@ -584,6 +585,12 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 					ser.connIsOccupied[e.cs.Conn] = false
 					consumedAddEvents++
 				} else {
+					if e.doClose {
+						close(e.cs.connUserClose)
+						if err := e.cs.Conn.Close(); err != nil {
+
+						}
+					}
 					delete(ser.connIsOccupied, e.cs.Conn)
 					delete(ser.inverseMap, e.cs.Conn)
 					if SpamLogger != nil {
@@ -802,6 +809,7 @@ func (ser *SharedEpollReceiver) Loop(onReadErrorAndRemoved func(cs *ConnSession,
 type epollerCSEvent struct {
 	cs        *ConnSession
 	eventType bool
+	doClose   bool
 }
 type netConnError struct {
 	conn net.Conn

@@ -492,8 +492,8 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				conn.closing.Done()
 			}()
 			if InfoLogger != nil {
-				InfoLogger(fmt.Sprintf("\n[CONN] Receiver of %s is up", conn.Remote()))
-				defer InfoLogger(fmt.Sprintf("\n[CONN] Receiver of %s is down!", conn.Remote()))
+				InfoLogger(fmt.Sprintf("[CONN] Receiver of %s is up", conn.Remote()))
+				defer InfoLogger(fmt.Sprintf("[CONN] Receiver of %s is down!", conn.Remote()))
 			}
 			recvWorkspace := make([]byte, bufferSize)
 			for {
@@ -559,7 +559,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 				defer func() {
 					conn.closing.Done()
 					if InfoLogger != nil {
-						InfoLogger(fmt.Sprintf("[CONN] Resoler for %s is closed.", conn.Remote()))
+						InfoLogger(fmt.Sprintf("[CONN] Resolver for %s is closed.", conn.Remote()))
 					}
 				}()
 				msgWorkspace := make([]byte, bufferSize)
