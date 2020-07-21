@@ -592,6 +592,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 						cachedLength = msgLength
 						break
 					} else {
+						resolved = 0
 						for resolved < msgLength {
 							r, err := recvBuffer.Read(resolveWorkspace[resolved:msgLength])
 							if err != nil {
