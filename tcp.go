@@ -563,9 +563,12 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 							}
 							resolved += uint32(r)
 						}
-						msg := make([]byte, read)
+						msg := make([]byte, resolved)
 						copy(msg, resolveWorkspace[:resolved])
 						conn.recevingQueue <- msg
+						if SpamLogger != nil {
+							SpamLogger(fmt.Sprintf("[CONN] Resolved cached %d length", cachedLength))
+						}
 						cachedLength = 0
 					}
 				}
@@ -590,6 +593,9 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 					}
 					if msgLength > uint32(recvBuffer.Len()) {
 						cachedLength = msgLength
+						if SpamLogger != nil {
+							SpamLogger(fmt.Sprintf("[CONN] Not enough buffered, cache length: %d", cachedLength))
+						}
 						break
 					} else {
 						resolved = 0
@@ -601,9 +607,12 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 							}
 							resolved += uint32(r)
 						}
-						msg := make([]byte, read)
+						msg := make([]byte, resolved)
 						copy(msg, resolveWorkspace[:resolved])
 						conn.recevingQueue <- msg
+						if SpamLogger != nil {
+							SpamLogger(fmt.Sprintf("[CONN] Resolved a %d bytes long message", resolved))
+						}
 					}
 				}
 			}
