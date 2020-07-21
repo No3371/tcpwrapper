@@ -577,6 +577,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 								if !defaultSafetySelect(conn) {
 									conn.errorClose(err, "resolving buffered bytes")
 								}
+								ErrorLogger(fmt.Sprintf("Resolving error: %s", err))
 								return
 							}
 							read += r
@@ -588,6 +589,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 								if !defaultSafetySelect(conn) {
 									conn.errorClose(err, "resolving buffered bytes")
 								}
+								ErrorLogger(fmt.Sprintf("Resolving error: %s", err))
 								return
 							}
 							read += r
@@ -605,6 +607,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 								if !defaultSafetySelect(conn) {
 									conn.errorClose(err, "resolving buffered bytes")
 								}
+								ErrorLogger(fmt.Sprintf("Resolving error: %s", err))
 								return
 							}
 							read += r
