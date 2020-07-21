@@ -562,6 +562,9 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 		if !discardMessage {
 			conn.closing.Add(1)
 			go func() {
+				if InfoLogger != nil {
+					InfoLogger(fmt.Sprintf("[CONN] Resolver for %s is up.", conn.Remote()))
+				}
 				defer func() {
 					conn.closing.Done()
 					if err := recover(); err != nil {
@@ -597,7 +600,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 							continue
 						}
 						for read < 4 {
-							r, err := recvBuffer.Read(msgWorkspace[read : 4-read])
+							r, err := recvBuffer.Read(msgWorkspace[read : 4])
 							if err != nil {
 								if !defaultSafetySelect(conn) {
 									conn.errorClose(err, "resolving buffered bytes")
@@ -613,7 +616,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 							msgLength = binary.LittleEndian.Uint32(msgWorkspace)
 						}
 						read = 0
-						for recvBuffer.Len() < int(msgLength) {
+						for uint32(recvBuffer.Len()) < msgLength {
 							waitingForNewBytes<-struct{}{}
 							continue
 						}
