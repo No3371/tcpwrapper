@@ -547,7 +547,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 					buffered += w
 				}
 				if SpamLogger != nil {
-					SpamLogger(fmt.Sprintf("[CONN] Receiver finished %d bytes to buffer", buffered))
+					SpamLogger(fmt.Sprintf("[CONN] Receiver wrote %d bytes to buffer", buffered))
 				}
 
 			}
@@ -558,6 +558,11 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 			go func() {
 				defer func() {
 					conn.closing.Done()
+					if err := recover(); err != nil {
+						if ErrorLogger != nil {
+							ErrorLogger(fmt.Sprintf("Recovered a panic in resolver: %s", err))
+						}
+					}
 					if InfoLogger != nil {
 						InfoLogger(fmt.Sprintf("[CONN] Resolver for %s is closed.", conn.Remote()))
 					}
@@ -578,7 +583,7 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 						}
 					} else {
 						for read < 4 {
-							r, err := recvBuffer.Read(msgWorkspace[read:4])
+							r, err := recvBuffer.Read(msgWorkspace[read : 4-read])
 							if err != nil {
 								if !defaultSafetySelect(conn) {
 									conn.errorClose(err, "resolving buffered bytes")
@@ -605,17 +610,18 @@ func (conn *ConnSession) Receiver(chanSize int, buffered bool, bufferSize int, d
 							read += r
 						}
 					}
+
 					select {
 					case <-waitingForBuffer:
 						if SpamLogger != nil {
 							SpamLogger(fmt.Sprintf("[CONN] Resolver notified the buffer is resolved"))
 						}
 					default:
+						msg := make([]byte, read)
+						copy(msg, msgWorkspace[:read])
+						conn.recevingQueue <- msg
 					}
 
-					msg := make([]byte, read)
-					copy(msg, msgWorkspace)
-					conn.recevingQueue <- msg
 				}
 			}()
 		}
